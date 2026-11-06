@@ -1,0 +1,87 @@
+{
+  "containers": 6,
+  "files": [
+    {
+      "file": "container.csv",
+      "rows": 6,
+      "sha256": "4d10e992c0f2ce72d479eb43982d88efde426c79938e0691ba01d6f82048c1a4"
+    },
+    {
+      "file": "containerassignment.csv",
+      "rows": 12,
+      "sha256": "9589a2893a8a96c9efd0a8bdafe90c92079060f4df553b698a52f4d175adb83d"
+    },
+    {
+      "file": "correctiveaction.csv",
+      "rows": 10,
+      "sha256": "5246c4893c1fa62a66f0b8f815adc3d362862bea065014aa40a225190ae67ae7"
+    },
+    {
+      "file": "custodyevent.csv",
+      "rows": 54,
+      "sha256": "617ef579b3860a3f0fb968f3ba95b3d6511f7e72d048e9dde719fc5830ac88f2"
+    },
+    {
+      "file": "excursion.csv",
+      "rows": 10,
+      "sha256": "3f6c3f57290bbedcfce48bf9a42193ff507b413c82bed8976bc82efbdbc988a3"
+    },
+    {
+      "file": "lifecycleevent.csv",
+      "rows": 31,
+      "sha256": "437e64a73d0160efb2cb8a66bd174c9b03772d57f10bdf78b61058c78a50d5ca"
+    },
+    {
+      "file": "notification.csv",
+      "rows": 10,
+      "sha256": "38d6c1fed6d83c2b806a2bef253fc3f959b15adf63f90e064b821680311d99bf"
+    },
+    {
+      "file": "product.csv",
+      "rows": 10,
+      "sha256": "15495c83b54faf0c084b996f984f8f8098e27cdd15859daa900273e8b4e07f87"
+    },
+    {
+      "file": "routestop.csv",
+      "rows": 48,
+      "sha256": "663ad6c888627ff31523121c5ce26daf22f59d571322c9f4a79479a46b5bf128"
+    },
+    {
+      "file": "sensor.csv",
+      "rows": 12,
+      "sha256": "a935b6cfac78318da2a6812ac5f3383a103693fe2715b4e1bcf321db4fc4022c"
+    },
+    {
+      "file": "sensorreading.csv",
+      "rows": 20258,
+      "sha256": "0bb8a1a7b637fe3cc3a70c3e785daf1bb70560f484e760204c136d8c02e2e82d"
+    },
+    {
+      "file": "shipment.csv",
+      "rows": 12,
+      "sha256": "4a03daace8841c9026052f52b285d53113190ce9600fb08fd20296e4eaa3134c"
+    },
+    {
+      "file": "thresholdpolicy.csv",
+      "rows": 10,
+      "sha256": "f46eeee3078221df6f5f4a0e1d44a24036f0588070262e9e8ccdd881d436aab2"
+    }
+  ],
+  "generator_version": "1.2",
+  "ground_truth_files": [
+    {
+      "file": "ground_truth.csv",
+      "rows": 13,
+      "sha256": "c650d0d7a72fa7cf4e98a38388df0bb5145ae6303c3166c75ba8c1a1a664ec0b"
+    },
+    {
+      "file": "ground_truth.json",
+      "rows": 13,
+      "sha256": "efba38bf2c7fbc907494b1040690ae2ebed45e820c96b1eacdc4437046d130f6"
+    }
+  ],
+  "products": 10,
+  "scale": "starter",
+  "seed": 20261022,
+  "shipments": 12
+}
