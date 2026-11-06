@@ -1,0 +1,17 @@
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+*.py[cod]
+.env
+.env.*
+!.env.example
+data/coldchain.db
+data/coldchain.db-*
+data/generated/*
+!data/generated/.gitkeep
+exports/*
+!exports/.gitkeep
