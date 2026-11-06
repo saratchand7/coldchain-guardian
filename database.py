@@ -1,0 +1,28 @@
+"""SQLite helpers and transactional lifecycle operations."""
+import sqlite3
+from contextlib import contextmanager
+from config import BASE_DIR, DATABASE
+
+def connect(path=DATABASE):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(path)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA foreign_keys = ON")
+    return db
+
+def initialize(path=DATABASE):
+    with connect(path) as db:
+        db.executescript((BASE_DIR / "database" / "schema.sql").read_text(encoding="utf-8"))
+
+@contextmanager
+def transaction(path=DATABASE):
+    db = connect(path)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
