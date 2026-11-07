@@ -52,7 +52,8 @@ def assess_shipment(db, shipment_id, as_of=None):
                 covered = False
                 for sensor in active:
                     reading = at_sensor.get((cursor.isoformat(), sensor['sensor_id']))
-                    if reading and reading_trust(db, reading, kind, start, calibrations)[0]:
+                    if reading and reading_trust(db, reading, kind, start, calibrations,
+                                                 require_assignment=False)[0]:
                         covered = True
                         break
                 if covered:

@@ -239,7 +239,8 @@ def detect_gaps(db, shipment_id, sensor_id, interval_minutes=INTERVAL_MINUTES,
                             'ORDER BY a.started_at LIMIT 1', (shipment_id, sensor_id)).fetchone()
     if not assignment:
         return []
-    start = parse_time(window_start or assignment['actual_departure'] or assignment['started_at'] or assignment['planned_departure'])
+    requested_start = parse_time(window_start or assignment['actual_departure'] or assignment['started_at'] or assignment['planned_departure'])
+    start = max(requested_start, parse_time(assignment['started_at']))
     if window_end:
         end = parse_time(window_end)
     elif assignment['actual_arrival']:
@@ -249,6 +250,8 @@ def detect_gaps(db, shipment_id, sensor_id, interval_minutes=INTERVAL_MINUTES,
         latest = db.execute('SELECT MAX(recorded_at) FROM SensorReading WHERE shipment_id=? AND sensor_id=?',
                             (shipment_id, sensor_id)).fetchone()[0]
         end = parse_time(saved['observed_through']) if saved else (parse_time(latest) if latest else start)
+    if assignment['ended_at']:
+        end = min(end, parse_time(assignment['ended_at']))
     if end < start:
         return []
     sensor_kind=db.execute('SELECT kind FROM Sensor WHERE sensor_id=?',(sensor_id,)).fetchone()
@@ -266,7 +269,8 @@ def detect_gaps(db, shipment_id, sensor_id, interval_minutes=INTERVAL_MINUTES,
             off_grid.append(row)
             continue
         slot = start + timedelta(minutes=slot_no*interval_minutes)
-        trusted, reason = reading_trust(db, row, sensor_kind['kind'], start, calibrations)
+        trusted, reason = reading_trust(db, row, sensor_kind['kind'], start, calibrations,
+                                        require_assignment=False)
         status_by_slot[slot] = 'VALID' if trusted else reason
     expected = []
     current = start
@@ -492,7 +496,8 @@ def _detect_excursions_impl(db, shipment_id, as_of=None):
         previous_at = None
         for reading in rows:
             at = parse_time(reading['recorded_at'])
-            trusted, trust_reason = reading_trust(db, reading, kind, sensor_start, calibration_resolver)
+            trusted, trust_reason = reading_trust(db, reading, kind, sensor_start,
+                                                  calibration_resolver, require_assignment=False)
             # A missing/invalid interval censors the current run before this reading is handled.
             if active and (not trusted or at-previous_at > timedelta(minutes=INTERVAL_MINUTES)):
                 groups.append(_finish_segment(active, None, None, sensor_end, 'GAP_OR_INVALID_OBSERVATION'))
