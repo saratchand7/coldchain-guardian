@@ -24,11 +24,22 @@ CREATE TABLE IF NOT EXISTS ContainerAssignment (
  UNIQUE(container_id, shipment_id), CHECK(ended_at IS NULL OR ended_at >= started_at)
 );
 CREATE INDEX IF NOT EXISTS idx_assignment_shipment ON ContainerAssignment(shipment_id);
+CREATE TABLE IF NOT EXISTS MonitoringWindow (
+ shipment_id TEXT PRIMARY KEY REFERENCES Shipment(shipment_id),
+ observation_start TEXT NOT NULL, observed_through TEXT NOT NULL,
+ updated_at TEXT NOT NULL, source TEXT NOT NULL,
+ CHECK(observed_through >= observation_start)
+);
 CREATE TABLE IF NOT EXISTS Sensor (
  sensor_id TEXT PRIMARY KEY, container_id TEXT NOT NULL REFERENCES Container(container_id),
  kind TEXT NOT NULL CHECK(kind IN ('TEMP','HUM')), calibrated_at TEXT NOT NULL,
  calibration_status TEXT NOT NULL CHECK(calibration_status IN ('VALID','EXPIRED','FAILED')),
  UNIQUE(container_id, kind)
+);
+CREATE TABLE IF NOT EXISTS SensorCalibrationHistory (
+ calibration_id TEXT PRIMARY KEY, sensor_id TEXT NOT NULL REFERENCES Sensor(sensor_id),
+ calibrated_at TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('VALID','EXPIRED','FAILED')),
+ recorded_at TEXT NOT NULL, notes TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS SensorReading (
  reading_id TEXT PRIMARY KEY, sensor_id TEXT NOT NULL REFERENCES Sensor(sensor_id),
@@ -37,6 +48,7 @@ CREATE TABLE IF NOT EXISTS SensorReading (
  UNIQUE(sensor_id, recorded_at)
 );
 CREATE INDEX IF NOT EXISTS idx_reading_shipment_time ON SensorReading(shipment_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_reading_shipment_sensor_time ON SensorReading(shipment_id, sensor_id, recorded_at);
 CREATE TABLE IF NOT EXISTS RouteStop (
  stop_id TEXT PRIMARY KEY, shipment_id TEXT NOT NULL REFERENCES Shipment(shipment_id),
  sequence_no INTEGER NOT NULL CHECK(sequence_no > 0), location TEXT NOT NULL,
@@ -59,6 +71,19 @@ CREATE TABLE IF NOT EXISTS Excursion (
  status TEXT NOT NULL DEFAULT 'OPEN' CHECK(status IN ('OPEN','ACKNOWLEDGED','CLOSED')), evidence_json TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_excursion_status ON Excursion(status, severity);
+CREATE TABLE IF NOT EXISTS ExcursionRevision (
+ revision_id TEXT PRIMARY KEY, excursion_id TEXT NOT NULL REFERENCES Excursion(excursion_id),
+ revision_no INTEGER NOT NULL, assessed_at TEXT NOT NULL, started_at TEXT NOT NULL,
+ ended_at TEXT, duration_minutes REAL NOT NULL CHECK(duration_minutes>=0),
+ severity TEXT NOT NULL CHECK(severity IN ('LOW','MEDIUM','HIGH','CRITICAL')),
+ policy_id TEXT, source_hash TEXT NOT NULL, evidence_json TEXT NOT NULL,
+ UNIQUE(excursion_id,revision_no), UNIQUE(excursion_id,source_hash)
+);
+CREATE TABLE IF NOT EXISTS ExcursionStatusEvent (
+ event_id TEXT PRIMARY KEY, excursion_id TEXT NOT NULL REFERENCES Excursion(excursion_id),
+ previous_status TEXT, new_status TEXT NOT NULL CHECK(new_status IN ('OPEN','ACKNOWLEDGED','CLOSED')),
+ occurred_at TEXT NOT NULL, actor TEXT NOT NULL DEFAULT 'demo-user', reason TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS CustodyEvent (
  event_id TEXT PRIMARY KEY, shipment_id TEXT NOT NULL REFERENCES Shipment(shipment_id),
  previous_custodian TEXT, new_custodian TEXT NOT NULL, event_type TEXT NOT NULL,
@@ -79,6 +104,12 @@ CREATE TABLE IF NOT EXISTS CorrectiveAction (
  status TEXT NOT NULL CHECK(status IN ('OPEN','IN_PROGRESS','COMPLETED','CANCELLED')),
  resolution_notes TEXT NOT NULL DEFAULT '',
  CHECK(status!='COMPLETED' OR completed_at IS NOT NULL)
+);
+CREATE TABLE IF NOT EXISTS CorrectiveActionEvent (
+ event_id TEXT PRIMARY KEY, action_id TEXT NOT NULL REFERENCES CorrectiveAction(action_id),
+ previous_status TEXT, new_status TEXT NOT NULL CHECK(new_status IN ('OPEN','IN_PROGRESS','COMPLETED','CANCELLED')),
+ assigned_to TEXT NOT NULL, occurred_at TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+ resolution_notes TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS Notification (
  notification_id TEXT PRIMARY KEY, excursion_id TEXT NOT NULL REFERENCES Excursion(excursion_id),

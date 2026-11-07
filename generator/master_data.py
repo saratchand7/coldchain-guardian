@@ -15,4 +15,8 @@ def insert_master_data(db,container_count):
         db.execute("INSERT INTO Container VALUES(?,?,'AVAILABLE')",(container,'REFRIGERATED'))
         for kind in ('TEMP','HUM'):
             calibration='VALID'
-            db.execute('INSERT INTO Sensor VALUES(?,?,?,?,?)',(f'SNS-{container}-{kind}',container,kind,'2026-01-01T00:00:00+00:00',calibration))
+            sensor_id=f'SNS-{container}-{kind}'
+            db.execute('INSERT INTO Sensor VALUES(?,?,?,?,?)',(sensor_id,container,kind,'2026-01-01T00:00:00+00:00',calibration))
+            db.execute('INSERT INTO SensorCalibrationHistory VALUES(?,?,?,?,?,?)',
+                       (f'CAL-{sensor_id}-001',sensor_id,'2026-01-01T00:00:00+00:00',calibration,
+                        '2026-01-01T00:00:00+00:00','Synthetic initial calibration'))

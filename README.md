@@ -2,35 +2,36 @@
 
 **A local cold-chain monitoring demo for tracking shipment conditions, detecting excursions, and preserving operational evidence.**
 
-ColdChain Guardian simulates temperature and humidity readings over shipment journeys. It applies effective-dated product policies, records exceptions with evidence, tracks route and custody history, and reports validation and evaluation metrics.
+ColdChain Guardian simulates temperature and humidity readings over shipment journeys. It applies effective-dated product policies, records source-linked exceptions, tracks route and custody history, and reports evidence completeness and evaluation metrics.
 
 > **Demo only:** All records and policy values are synthetic. This project is not a validated quality system and must not be used to make product handling or safety decisions.
 
 ## Contents
 
 - [Features](#features)
-- [Quick start on Windows](#quick-start-on-windows)
+- [Quick start](#quick-start)
 - [Generate data](#generate-data)
 - [Run tests and validation](#run-tests-and-validation)
-- [How it works](#how-it-works)
+- [Monitoring decisions](#monitoring-decisions)
 - [Data and exports](#data-and-exports)
-- [Application pages and API](#application-pages-and-api)
+- [Application and API](#application-and-api)
 - [Project structure](#project-structure)
 - [Scope and limitations](#scope-and-limitations)
 
 ## Features
 
-- Temperature and humidity monitoring for shipments and storage containers.
-- Product-specific, effective-dated threshold policies and excursion-duration rules.
-- Detection of brief and prolonged excursions, physical-range faults, sensor gaps, calibration failures, and route delays.
-- Evidence-backed exceptions, notifications, and corrective actions.
-- Shipment lifecycle, route-stop, and append-only custody history.
+- Temperature and humidity monitoring with separate units and product policies.
+- Effective-dated threshold policy checks, duration rules, calibration checks, and route delay detection.
+- Leading, trailing, internal, invalid, and wholly absent expected sensor observations.
+- Stable excursion identities with append-only evidence revisions and status history.
+- Corrective actions with preserved status and resolution history.
+- Shipment lifecycle, route-stop, and custody records with delivery reconciliation.
 - Dashboard, shipment and route views, excursion review, reports, and CSV/JSON exports.
-- Deterministic synthetic data, separate ground-truth labels, validation checks, and reproducibility reports.
+- Deterministic synthetic data, separate ground-truth labels, validation, and reproducibility manifests.
 
-## Quick start on Windows
+## Quick start
 
-Open PowerShell in the project folder and run:
+### Windows PowerShell
 
 ```powershell
 py -3.12 -m venv .venv
@@ -40,77 +41,77 @@ python generate_data.py --scale starter --seed 20261022
 python app.py
 ```
 
-Then open [http://127.0.0.1:5000](http://127.0.0.1:5000). Keep the terminal open while using the app; press **Ctrl+C** to stop it. The local demo does not require a user login.
+### macOS and Linux
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python generate_data.py --scale starter --seed 20261022
+python app.py
+```
+
+Open [http://127.0.0.1:5000](http://127.0.0.1:5000). Keep the terminal open while using the app; stop it with **Ctrl+C**. The local demo does not require a user login.
 
 ## Generate data
 
-The generator resets the local SQLite demo database each time it runs. Do not point it at operational data.
+The generator resets the configured demo database. Do not point it at operational data.
 
-```powershell
-# Small dataset for local use
+```bash
+# Small local dataset
 python generate_data.py --scale starter --seed 20261022
 
-# Full problem-statement volume: 1,000 shipments and 300 containers
+# Problem-statement volume: 1,000 shipments and 300 containers
 python generate_data.py --scale full --seed 20261022
 
-# Also export a portable SQL seed
-python generate_data.py --scale starter --seed 20261022 --sql
+# Optional portable formats and active-trip observation horizon
+python generate_data.py --scale starter --seed 20261022 --json --sql
+python generate_data.py --scale full --seed 20261022 --as-of 2026-11-07T00:00:00+00:00
 ```
 
-Readings are generated every five minutes over two-to-five-day planned trips. Active shipments stop at their current observation horizon; delayed completed trips include readings through actual arrival. Valid baseline records are staged before deterministic edge cases are applied.
+Readings are generated on a five-minute schedule over two-to-five-day planned trips. Completed trips use actual arrival; active trips are provisional and may use an explicit `--as-of` horizon. A run writes `run_status.json` and publishes its source manifest after validation. A non-passing validation exits with a nonzero status.
 
 ## Run tests and validation
 
-```powershell
+```bash
 python -m pytest -q
 ```
 
-The project also generates `data/generated/validation_summary.json`, `validation_report.csv`, and `evaluation_summary.json`. Validation covers keys and joins, reading assignments and trip windows, physical ranges, lifecycle and custody chronology, route ordering, policy dates, excursion evidence, detected gaps, and export consistency. The current starter dataset passes **20/20 checks**; the test suite contains **15 tests**.
+Generation writes `data/generated/validation_summary.json`, `validation_report.csv`, and `evaluation_summary.json`. Validation checks keys and joins, source assignments, unit and calibration meaning, effective policy coverage, expected sensor windows, route order, lifecycle and custody state, event evidence, action history, ground-truth references, and export hashes. Checks that were not run are listed separately; they are not counted as passing checks.
 
-GitHub Actions runs the test suite on pushes and pull requests to `main`.
+## Monitoring decisions
 
-## How it works
+Compliance has four outcomes: `COMPLIANT`, `NON_COMPLIANT`, `INCOMPLETE_EVIDENCE`, and `NOT_YET_ASSESSED`.
 
-```mermaid
-flowchart LR
-    G[Fixed-seed generator] -->|baseline then labelled faults| DB[(SQLite)]
-    UI[Flask dashboard] --> API[Application services]
-    API <--> DB
-    API --> EX[Exceptions, notices, actions]
-    DB --> CSV[CSV, JSON, SQL exports]
-    GT[Separate ground truth] --> EV[Evaluation metrics]
-    EX --> EV
-```
+- A completed shipment can be `COMPLIANT` only if its expected readings are present and trusted across the journey, sensor assignment and calibration are valid, and exactly one product policy covers every expected sample.
+- A detected temperature or humidity excursion above the policy duration allowance is `NON_COMPLIANT`.
+- Missing, invalid, off-grid, stale, or untrusted observations, missing/overlapping policy, and invalid calibration keep the evidence incomplete.
+- Active trips remain provisional and do not increase completed compliance.
 
-The detector uses source records and product policies; it never reads the ground-truth files. Ground truth is used only for post-detection evaluation. A positive event matches a stored detection by shipment, sensor, event kind, and start time. The full-scale evaluation reports **588 true positives, zero false positives, and zero false negatives** for the fixed seed. True negatives are unavailable because the project does not label every safe five-minute interval.
+An excursion begins at its first violating sample and ends at its first valid recovery sample. If recovery has not arrived, the duration is censored at the last observed violating sample plus one expected interval, bounded by the assessment window. A gap breaks the run; unobserved time is not counted as measured violation. Each event retains a stable ID and appends a revision containing its source reading IDs, policy bounds and allowance, duration, severity, recovery state, and source hash. Replaying identical input creates no revision.
 
-The full-scale generator creates **1,000 shipments, 300 containers, 600 sensors, and 1,812,402 readings**. Two full runs with seed `20261022` produced matching output checksums. See [`docs/REPRODUCIBILITY_REPORT.md`](docs/REPRODUCIBILITY_REPORT.md) for hashes and run details.
+The detector reads source database records only; it never reads ground truth. Positive event detection scores and negative-decision checks are reported separately. True negatives are unavailable because the dataset does not label every safe five-minute interval.
 
 ## Data and exports
 
-Core entities are `Product`, `Shipment`, `Container`, `Sensor`, `SensorReading`, `RouteStop`, `ThresholdPolicy`, `Excursion`, `CustodyEvent`, and `CorrectiveAction`. Supporting tables include `ContainerAssignment` for shipment/container assignment history, `LifecycleEvent` for state history, and `Notification` for alerts.
+Core entities are `Product`, `Shipment`, `Container`, `Sensor`, `SensorReading`, `RouteStop`, `ThresholdPolicy`, `Excursion`, `CustodyEvent`, and `CorrectiveAction`. Supporting tables include `ContainerAssignment`, `SensorCalibrationHistory`, `ExcursionRevision`, `ExcursionStatusEvent`, `CorrectiveActionEvent`, `LifecycleEvent`, and `Notification`.
 
 - Schema: [`database/schema.sql`](database/schema.sql)
-- Field-level dictionary and relationships: [`docs/DATA_DICTIONARY.md`](docs/DATA_DICTIONARY.md)
+- Field-level dictionary: [`docs/DATA_DICTIONARY.md`](docs/DATA_DICTIONARY.md)
 - Business rules: [`docs/BUSINESS_RULES.md`](docs/BUSINESS_RULES.md)
-- Validation results: [`docs/VALIDATION_REPORT.md`](docs/VALIDATION_REPORT.md)
-- Independent labels: `data/generated/ground_truth.csv` and `ground_truth.json`
-- Generated source exports and hashes: `data/generated/` and `data/source_manifest.json`
+- Validation report: [`docs/VALIDATION_REPORT.md`](docs/VALIDATION_REPORT.md)
+- Separate labels: `data/generated/ground_truth.csv` and `ground_truth.json`
+- Generated source files and hashes: `data/generated/` and `data/source_manifest.json`
 
-Generated databases, exports, virtual environments, and local secrets are excluded from Git. Generate the starter records after cloning to recreate them. The optional SQL seed is also generated on demand with `--sql`.
+CSV is generated by default. `--json` adds per-table JSON; `--sql` adds a portable SQL seed. The manifest records the seed, scale, interval, Python version, source commit, formats, hashes, and optional SQL hash. Generated databases, exports, virtual environments, and local secrets are excluded from Git.
 
-## Application pages and API
+## Application and API
 
-The application provides Overview, Shipments, Live Monitoring, Route Tracking, Excursions, Corrective Actions, Custody History, and Reports & Exports pages.
+The application provides Overview, Shipments, Live Monitoring, Route Tracking, Excursions, Corrective Actions, Custody History, and Reports & Exports pages. There is no login because this is a local educational demo.
 
-Key endpoints include:
+Key endpoints include `GET /api/dashboard`, `/api/shipments`, `/api/readings`, `/api/routes`, `/api/excursions`, `/api/actions`, `/api/metrics`, and `/api/validation`; `POST /api/detect`; lifecycle, custody, and corrective-action update endpoints; and streaming table exports at `/api/export/<table>.csv` and `.json`.
 
-- `GET /api/dashboard`, `/api/shipments`, `/api/readings`, `/api/routes`, `/api/excursions`, `/api/actions`, `/api/metrics`, `/api/validation`
-- `POST /api/detect` to run detection
-- `PATCH /api/shipments/<id>/status` to record a lifecycle transition
-- `POST /api/shipments/<id>/custody` to append a custody event
-- `PATCH /api/actions/<id>` to update a corrective action
-- `GET /api/export/<table>.csv` and `/api/export/<table>.json` to export records
+Shipment and reading lists accept `page` and `limit` and return `items`, `total`, `returned`, `pages`, and `next_page`. Readings also accept `shipment_id`, `sensor_id`, `kind`, `from`, and `to`. The monitoring chart states how many records it displays; filter to a shipment or request additional pages/time windows for a complete journey. Excursion detail includes source revisions and status history; action records retain their transition history.
 
 ## Project structure
 
@@ -118,9 +119,9 @@ Key endpoints include:
 app.py                  Flask application and API routes
 database/               SQLite schema
 generator/              Deterministic data and SQL-seed generation
-services/               Detection, lifecycle, metrics, and validation rules
+services/               Detection, assessment, metrics, lifecycle and validation
 static/ and templates/   Dashboard assets and pages
-tests/                  Automated test suite
+tests/                  Automated regression and application tests
 docs/                   Data dictionary, business rules, and reports
 ```
 

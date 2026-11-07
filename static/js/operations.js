@@ -1,5 +1,5 @@
 async function loadTables(){
- const rows=await get('/api/shipments');
+ const rows=(await get('/api/shipments?limit=1000')).items;
  const fill=function(id){const el=document.getElementById(id);if(!el)return;const prior=el.value;const first=el.options[0].outerHTML;el.innerHTML=first+rows.map(x=>'<option value="'+esc(x.shipment_id)+'">'+esc(x.shipment_id)+'</option>').join('');if(rows.some(x=>x.shipment_id===prior))el.value=prior};
  ['shipmentSelect','routeShipment','custodyShipment','custodyFilter'].forEach(fill);
  const st=document.querySelector('#shipmentTable tbody');
@@ -17,7 +17,7 @@ function nextStates(status){return ({CREATED:['READY'],READY:['IN_TRANSIT'],IN_T
 function nextActionStates(status){return ({OPEN:['IN_PROGRESS','CANCELLED'],IN_PROGRESS:['COMPLETED','CANCELLED'],COMPLETED:[],CANCELLED:[]})[status]||[]}
 async function changeStatus(id,status){if(!status)return;const r=await fetch('/api/shipments/'+encodeURIComponent(id)+'/status',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status,location:'Operations dashboard'})});if(!r.ok){alert((await r.json()).error);return}await loadTables();await loadDashboard()}
 async function recalculate(id){const r=await fetch('/api/excursions/'+encodeURIComponent(id)+'/recalculate-duration',{method:'POST'});const d=await r.json();if(!r.ok)alert(d.error);else alert(d.flagged?'Duration undercount flagged.':'Duration evidence matches stored duration.');await loadTables()}
-async function setException(id,status){const r=await fetch('/api/excursions/'+encodeURIComponent(id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status})});if(!r.ok){alert((await r.json()).error);await loadTables()}}
+async function setException(id,status){const reason=status==='CLOSED'?prompt('Enter closure reason or evidence reference:'):'';if(status==='CLOSED'&&!reason)return;const r=await fetch('/api/excursions/'+encodeURIComponent(id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status,reason})});if(!r.ok){alert((await r.json()).error);await loadTables()}}
 async function loadValidation(){const p=document.getElementById('validation');if(p)p.textContent=JSON.stringify(await get('/api/validation'),null,2);const m=document.getElementById('metrics');if(m)m.textContent=JSON.stringify(await get('/api/metrics'),null,2)}
 const baseDashboard=loadDashboard;
 loadDashboard=async function(){await baseDashboard();if(!document.getElementById('availabilityChart'))return;const d=await get('/api/dashboard');new Chart(document.getElementById('availabilityChart'),{type:'doughnut',data:{labels:['Available','Missing / invalid'],datasets:[{data:[d.availability.percentage,100-d.availability.percentage],backgroundColor:['#19b7a1','#e9edf2']}]},options:{plugins:{legend:{position:'bottom'}}}});new Chart(document.getElementById('actionChart'),{type:'bar',data:{labels:d.actions.map(x=>x.status),datasets:[{data:d.actions.map(x=>x.count),backgroundColor:'#19b7a1',borderRadius:5}]},options:{plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{precision:0}}}}})};

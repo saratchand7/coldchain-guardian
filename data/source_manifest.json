@@ -1,10 +1,17 @@
 {
+  "as_of": null,
   "containers": 6,
   "files": [
     {
       "file": "container.csv",
       "rows": 6,
-      "sha256": "4d10e992c0f2ce72d479eb43982d88efde426c79938e0691ba01d6f82048c1a4"
+      "sha256": "f852b0d07c2de7c7d996718da6e88f7b523da6afd616b2893be90ad2e770a2db"
+    },
+    {
+      "file": "container.json",
+      "format": "json",
+      "rows": 6,
+      "sha256": "56cea1edec185c25b909d079df5042424bd3f968aa8772942f5e3c74394ae138"
     },
     {
       "file": "containerassignment.csv",
@@ -12,19 +19,76 @@
       "sha256": "9589a2893a8a96c9efd0a8bdafe90c92079060f4df553b698a52f4d175adb83d"
     },
     {
+      "file": "containerassignment.json",
+      "format": "json",
+      "rows": 12,
+      "sha256": "81c1a6ee4918eb205170095867e88fad66e5db1fdc4ca0dd7e39b703ad3a66ef"
+    },
+    {
       "file": "correctiveaction.csv",
-      "rows": 10,
-      "sha256": "5246c4893c1fa62a66f0b8f815adc3d362862bea065014aa40a225190ae67ae7"
+      "rows": 13,
+      "sha256": "d2ca4b34929a0e8d7d75d06a55306ba5ec931c63f3aaf01f0daf84f51de0eb7b"
+    },
+    {
+      "file": "correctiveaction.json",
+      "format": "json",
+      "rows": 13,
+      "sha256": "a57d1952bae270d5d37eaca36997baef4e4813f2d82b7579d0d8dbf0232e0b06"
+    },
+    {
+      "file": "correctiveactionevent.csv",
+      "rows": 13,
+      "sha256": "9e2063eefdfee681a372f7f16fab13e2d4b6cf9e04ed5f2f84872672fa7f7482"
+    },
+    {
+      "file": "correctiveactionevent.json",
+      "format": "json",
+      "rows": 13,
+      "sha256": "8746a20b51386d8c73c227750ae02899be851e101d499c2fa241239fd3397ddf"
     },
     {
       "file": "custodyevent.csv",
       "rows": 54,
-      "sha256": "617ef579b3860a3f0fb968f3ba95b3d6511f7e72d048e9dde719fc5830ac88f2"
+      "sha256": "5f267be1facf22688bd5dc87eedbb1a4c44ee82e823bae882e6d4e57c3f95d86"
+    },
+    {
+      "file": "custodyevent.json",
+      "format": "json",
+      "rows": 54,
+      "sha256": "09a61dc0457cca4c6faef9a0d90bca5d42f7812678dd2df41b9b8c1e064d2804"
     },
     {
       "file": "excursion.csv",
-      "rows": 10,
-      "sha256": "3f6c3f57290bbedcfce48bf9a42193ff507b413c82bed8976bc82efbdbc988a3"
+      "rows": 13,
+      "sha256": "95895f06f98f7a861bc441aee24b2e3b0cdb1951c040e6b4749d9e435ba89f46"
+    },
+    {
+      "file": "excursion.json",
+      "format": "json",
+      "rows": 13,
+      "sha256": "56990f0c9b4ced25e61f2b17e111c60fae8dacd20db1b2a6db2327e7810ad185"
+    },
+    {
+      "file": "excursionrevision.csv",
+      "rows": 13,
+      "sha256": "051c79353a616e9fccd9b33a79b14cb36113e4684ba1d65ee62168beedf68f86"
+    },
+    {
+      "file": "excursionrevision.json",
+      "format": "json",
+      "rows": 13,
+      "sha256": "e75e1c147f5973dc89cc2317f43091e5561e2fb4d981466833945352dfdd59ea"
+    },
+    {
+      "file": "excursionstatusevent.csv",
+      "rows": 13,
+      "sha256": "45e6de5fcf2d73684cfebd3e046ba089a287d812bbc1fba9f9d0fbe3b6d96257"
+    },
+    {
+      "file": "excursionstatusevent.json",
+      "format": "json",
+      "rows": 13,
+      "sha256": "9afb84c8f45e3e2d102bacdd8ff9d7444f44ca4661dedc72494fd480b9957dde"
     },
     {
       "file": "lifecycleevent.csv",
@@ -32,9 +96,32 @@
       "sha256": "437e64a73d0160efb2cb8a66bd174c9b03772d57f10bdf78b61058c78a50d5ca"
     },
     {
+      "file": "lifecycleevent.json",
+      "format": "json",
+      "rows": 31,
+      "sha256": "bb75d4780ba758cc739a3741de688fe76006b61642b57e6908b211b544f26817"
+    },
+    {
+      "file": "monitoringwindow.csv",
+      "rows": 12,
+      "sha256": "d5dcaa71dbf7c29ee8f004e36e6ed1cc424cd4b3972a3502f7410333fa0c62e1"
+    },
+    {
+      "file": "monitoringwindow.json",
+      "format": "json",
+      "rows": 12,
+      "sha256": "a22c2dda20e46ce95a840fb6b0ded88042b65d7f72103726ce3cb5a361239ec9"
+    },
+    {
       "file": "notification.csv",
-      "rows": 10,
-      "sha256": "38d6c1fed6d83c2b806a2bef253fc3f959b15adf63f90e064b821680311d99bf"
+      "rows": 13,
+      "sha256": "87a8ade659c8c57268f63207b1c0d9f85c71b7eae0f0ba576a40ee316cbd3fd2"
+    },
+    {
+      "file": "notification.json",
+      "format": "json",
+      "rows": 13,
+      "sha256": "7624ff5946bf1a854f1700f0b75ce9ac1b52f8896f42babd24a27f821df53e9f"
     },
     {
       "file": "product.csv",
@@ -42,9 +129,21 @@
       "sha256": "15495c83b54faf0c084b996f984f8f8098e27cdd15859daa900273e8b4e07f87"
     },
     {
+      "file": "product.json",
+      "format": "json",
+      "rows": 10,
+      "sha256": "ff18472b2312b4b47b19478ec47e0dca0baa09ef2690edafcca15999076f2125"
+    },
+    {
       "file": "routestop.csv",
       "rows": 48,
       "sha256": "663ad6c888627ff31523121c5ce26daf22f59d571322c9f4a79479a46b5bf128"
+    },
+    {
+      "file": "routestop.json",
+      "format": "json",
+      "rows": 48,
+      "sha256": "166d9591c90769c20f67c4690ef7371e6c206a5dfe57e54c53743a6fb2bd8a41"
     },
     {
       "file": "sensor.csv",
@@ -52,9 +151,32 @@
       "sha256": "a935b6cfac78318da2a6812ac5f3383a103693fe2715b4e1bcf321db4fc4022c"
     },
     {
+      "file": "sensor.json",
+      "format": "json",
+      "rows": 12,
+      "sha256": "26690928db3ccf3cd6e370d10a83bf3b0429231f273e7258f35749c880be4428"
+    },
+    {
+      "file": "sensorcalibrationhistory.csv",
+      "rows": 13,
+      "sha256": "8161dc5f0fff8b0a300e720cf66520284c715000453b1f10609795c560caeda7"
+    },
+    {
+      "file": "sensorcalibrationhistory.json",
+      "format": "json",
+      "rows": 13,
+      "sha256": "01d1089a9269f7c82c81e72b2b5a2dc924900db0045c21d9571e5970461a82ab"
+    },
+    {
       "file": "sensorreading.csv",
       "rows": 20258,
       "sha256": "0bb8a1a7b637fe3cc3a70c3e785daf1bb70560f484e760204c136d8c02e2e82d"
+    },
+    {
+      "file": "sensorreading.json",
+      "format": "json",
+      "rows": 20258,
+      "sha256": "5225511a8b0e9b2e3070ced8f2b98f374c521f3dfd4a53d896789cdec062cd19"
     },
     {
       "file": "shipment.csv",
@@ -62,26 +184,49 @@
       "sha256": "4a03daace8841c9026052f52b285d53113190ce9600fb08fd20296e4eaa3134c"
     },
     {
+      "file": "shipment.json",
+      "format": "json",
+      "rows": 12,
+      "sha256": "34d74ad32b26e5955958115ffa54c08e7e6fd90d565d4063e32a1826fa9d6a59"
+    },
+    {
       "file": "thresholdpolicy.csv",
       "rows": 10,
       "sha256": "f46eeee3078221df6f5f4a0e1d44a24036f0588070262e9e8ccdd881d436aab2"
+    },
+    {
+      "file": "thresholdpolicy.json",
+      "format": "json",
+      "rows": 10,
+      "sha256": "103a1a4feb65d736e155e421e982fec7bc2e44fd3012c0a79bc2e8b2b76e4f95"
     }
   ],
-  "generator_version": "1.2",
+  "generator_version": "1.3",
   "ground_truth_files": [
     {
       "file": "ground_truth.csv",
       "rows": 13,
-      "sha256": "c650d0d7a72fa7cf4e98a38388df0bb5145ae6303c3166c75ba8c1a1a664ec0b"
+      "sha256": "212750c41f219829aa8e91ddda44816dec2a1447d4c6e86558e373d0cf9d8419"
     },
     {
       "file": "ground_truth.json",
       "rows": 13,
-      "sha256": "efba38bf2c7fbc907494b1040690ae2ebed45e820c96b1eacdc4437046d130f6"
+      "sha256": "7543e047303f6b42023613032095bec18926aa87c0bf1a106708ae1bc27be170"
     }
   ],
+  "interval_minutes": 5,
   "products": 10,
+  "python_version": "3.12.9",
   "scale": "starter",
   "seed": 20261022,
-  "shipments": 12
+  "shipments": 12,
+  "source_commit": "76ceb2adea3b078b3a9193038cd736874e610928",
+  "sql_export": {
+    "bytes": 5070064,
+    "file": "seed.sql",
+    "sha256": "1a891e0d013b84042a1fb17300673132ba75a78c5a291cd03298a9cf3d9df8b2"
+  },
+  "status": "COMPLETE",
+  "synthetic_only": true,
+  "timestamp_policy": "wall-clock generation time omitted for reproducibility"
 }

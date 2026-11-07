@@ -21,11 +21,17 @@ All timestamps are ISO 8601 UTC text. PK is primary key; FK is foreign key. Requ
 | ContainerAssignment | assignment_id | TEXT | Yes | PK |
 | ContainerAssignment | container_id, shipment_id | TEXT | Yes | FK Container and Shipment; pair UNIQUE |
 | ContainerAssignment | started_at, ended_at | TEXT | Start required, end optional | End must not precede start; validation detects overlapping assignments |
+| MonitoringWindow | shipment_id | TEXT | Yes | PK/FK Shipment; one explicit assessment horizon per shipment |
+| MonitoringWindow | observation_start, observed_through | TEXT | Yes | UTC window used for expected sensor coverage; end cannot precede start |
+| MonitoringWindow | updated_at, source | TEXT | Yes | UTC update and documented horizon source |
 | Sensor | sensor_id | TEXT | Yes | PK; SNS-CNT-######-TEMP/HUM |
 | Sensor | container_id | TEXT | Yes | FK Container |
 | Sensor | kind | TEXT | Yes; TEMP, HUM | Unique per container and kind |
 | Sensor | calibrated_at | TEXT | Yes | ISO 8601 UTC |
 | Sensor | calibration_status | TEXT | Yes; VALID, EXPIRED, FAILED | CHECK constraint; non-valid status raises exception |
+| SensorCalibrationHistory | calibration_id | TEXT | Yes | PK |
+| SensorCalibrationHistory | sensor_id, calibrated_at, status | TEXT | Yes | FK Sensor; calibration is evaluated as of each reading |
+| SensorCalibrationHistory | recorded_at, notes | TEXT | Yes | Audit timestamp and retained calibration evidence |
 | SensorReading | reading_id | TEXT | Yes | PK; RDG-sensor-timestamp |
 | SensorReading | sensor_id, shipment_id | TEXT | Yes | FK Sensor and Shipment |
 | SensorReading | recorded_at | TEXT | Yes | UNIQUE with sensor_id |
@@ -53,6 +59,12 @@ All timestamps are ISO 8601 UTC text. PK is primary key; FK is foreign key. Requ
 | Excursion | severity | TEXT | Yes; LOW, MEDIUM, HIGH, CRITICAL | CHECK constraint |
 | Excursion | status | TEXT | Yes; OPEN, ACKNOWLEDGED, CLOSED | Operational state |
 | Excursion | evidence_json | TEXT | Yes; defaults to empty object | Serialized source IDs, readings, policy/range or route evidence |
+| ExcursionRevision | revision_id | TEXT | Yes | PK; one immutable revision per changed source hash |
+| ExcursionRevision | excursion_id, revision_no | TEXT, INTEGER | Yes | FK Excursion; revision number unique per event |
+| ExcursionRevision | assessed_at, started_at, ended_at, duration_minutes, severity | TEXT/REAL | Yes except end | Source-derived current-event projection history |
+| ExcursionRevision | policy_id, source_hash, evidence_json | TEXT | Policy optional; hash/evidence required | Captures policy lineage and canonical source evidence |
+| ExcursionStatusEvent | event_id, excursion_id | TEXT | Yes | PK and FK Excursion |
+| ExcursionStatusEvent | previous_status, new_status, occurred_at, actor, reason | TEXT | New status/time/actor required | Append-only acknowledgement and closure history |
 | CustodyEvent | event_id | TEXT | Yes | PK, deterministic |
 | CustodyEvent | shipment_id | TEXT | Yes | FK Shipment |
 | CustodyEvent | previous_custodian | TEXT | Optional | Prior party, absent for first event |
@@ -71,9 +83,12 @@ All timestamps are ISO 8601 UTC text. PK is primary key; FK is foreign key. Requ
 | CorrectiveAction | completed_at | TEXT | Optional | Set on transition to COMPLETED |
 | CorrectiveAction | status | TEXT | Yes; OPEN, IN_PROGRESS, COMPLETED, CANCELLED | CHECK and transition rules |
 | CorrectiveAction | resolution_notes | TEXT | Yes | Defaults to empty text |
+| CorrectiveActionEvent | event_id, action_id | TEXT | Yes | PK and FK CorrectiveAction |
+| CorrectiveActionEvent | previous_status, new_status, assigned_to, occurred_at | TEXT | Required except previous status | Append-only state and assignment history |
+| CorrectiveActionEvent | reason, resolution_notes | TEXT | Yes | Retains completion evidence and transition reason |
 | Notification | notification_id | TEXT | Yes | PK |
 | Notification | excursion_id | TEXT | Yes | FK Excursion |
 | Notification | created_at, message | TEXT | Yes | Required event notice |
 | Notification | acknowledged | INTEGER | Yes; 0 or 1 | CHECK constraint |
 
-ContainerAssignment is the bridge/history table for shipment and container allocation. LifecycleEvent and CustodyEvent are append-only historical records.
+ContainerAssignment is the bridge/history table for shipment and container allocation. MonitoringWindow records the explicit observation boundary for active journeys. LifecycleEvent, CustodyEvent, ExcursionStatusEvent, ExcursionRevision, and CorrectiveActionEvent are append-only historical records.

@@ -1,5 +1,8 @@
 __pycache__/
 .pytest_cache/
+.pytest-tmp/
+.verify-data/
+.verify-reports/
 .mypy_cache/
 .ruff_cache/
 .coverage
@@ -11,6 +14,7 @@ htmlcov/
 !.env.example
 data/coldchain.db
 data/coldchain.db-*
+data/run_status.json
 data/generated/*
 !data/generated/.gitkeep
 exports/*

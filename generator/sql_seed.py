@@ -3,7 +3,7 @@ from pathlib import Path
 from database import connect
 from config import GENERATED
 
-TABLES=('Product','Shipment','Container','ContainerAssignment','Sensor','SensorReading','RouteStop','ThresholdPolicy','Excursion','CustodyEvent','LifecycleEvent','CorrectiveAction','Notification')
+TABLES=('Product','Shipment','Container','ContainerAssignment','MonitoringWindow','Sensor','SensorCalibrationHistory','SensorReading','RouteStop','ThresholdPolicy','Excursion','ExcursionRevision','ExcursionStatusEvent','CustodyEvent','LifecycleEvent','CorrectiveAction','CorrectiveActionEvent','Notification')
 DELETE_ORDER=tuple(reversed(TABLES))
 
 def _literal(value):
@@ -27,4 +27,4 @@ def export_sql_seed(path=None):
                         out.write('INSERT INTO "'+table+'" ('+col_sql+') VALUES ('+values+');\n')
             out.write('COMMIT;\nPRAGMA foreign_keys=ON;\n')
     finally:db.close()
-    return {'file':str(target.relative_to(target.parents[1])).replace('\\','/'),'bytes':target.stat().st_size}
+    return {'file':target.name,'bytes':target.stat().st_size}
