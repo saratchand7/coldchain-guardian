@@ -168,6 +168,9 @@ def detect_gaps(db, shipment_id, sensor_id, interval_minutes=INTERVAL_MINUTES,
         end = parse_time(saved['observed_through']) if saved else (parse_time(latest) if latest else start)
     if end < start:
         return []
+    sensor_kind=db.execute('SELECT kind FROM Sensor WHERE sensor_id=?',(sensor_id,)).fetchone()
+    if not sensor_kind:return []
+    expected_unit='C' if sensor_kind['kind']=='TEMP' else '%'
     rows = db.execute('SELECT reading_id,recorded_at,unit,quality FROM SensorReading WHERE shipment_id=? AND sensor_id=? '
                       'AND recorded_at>=? AND recorded_at<=? ORDER BY recorded_at',
                       (shipment_id, sensor_id, start.isoformat(), end.isoformat())).fetchall()
@@ -182,7 +185,7 @@ def detect_gaps(db, shipment_id, sensor_id, interval_minutes=INTERVAL_MINUTES,
         slot = start + timedelta(minutes=slot_no*interval_minutes)
         if row['quality'] != 'VALID':
             status_by_slot[slot] = 'INVALID_OBSERVATION'
-        elif not _is_expected_unit(db, sensor_id, row) or not calibrations.valid(sensor_id, row['recorded_at']):
+        elif row['unit'] != expected_unit or not calibrations.valid(sensor_id, row['recorded_at']):
             status_by_slot[slot] = 'UNTRUSTED_OBSERVATION'
         else:
             status_by_slot[slot] = 'VALID'

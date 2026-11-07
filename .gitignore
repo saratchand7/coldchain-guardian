@@ -1,8 +1,13 @@
 __pycache__/
 .pytest_cache/
 .pytest-tmp/
+.pytest-tmp-full/
+.pytest-tmp-final/
+.pytest-tmp-final2/
 .verify-data/
 .verify-reports/
+.full-verify-one/
+.full-verify-two/
 .mypy_cache/
 .ruff_cache/
 .coverage

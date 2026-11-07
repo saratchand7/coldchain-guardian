@@ -6,6 +6,10 @@ import pytest
 from database import initialize, connect, transaction
 from services.assessment import assess_shipment
 from services.engine import detect_excursions, detect_gaps, check_excursion_duration
+from services.corrective_actions import update_action
+from services.excursion_status import update_excursion_status
+from services.lifecycle import add_custody_event
+from services.validation import validate
 
 T0=datetime(2026,1,1,tzinfo=timezone.utc)
 
@@ -86,4 +90,57 @@ def test_open_excursion_revises_incrementally_and_replay_is_idempotent(tmp_path)
     db.execute('UPDATE Excursion SET evidence_json=? WHERE excursion_id=?',(json.dumps(data),identity));db.commit()
     with pytest.raises(ValueError,match='timestamp'):
         check_excursion_duration(db,identity)
+    db.close()
+
+def test_exact_policy_duration_boundaries(tmp_path):
+    p=setup_db(tmp_path/'boundaries.db');db=connect(p)
+    for minute,value in ((0,9),(5,9),(10,5)):add_reading(db,minute,value)
+    db.commit();detect_excursions(db,'S',(T0+timedelta(minutes=10)).isoformat())
+    event=db.execute("SELECT duration_minutes,severity FROM Excursion WHERE kind='TEMP'").fetchone()
+    assert event['duration_minutes']==10 and event['severity']=='LOW' # equal allowance
+    db.execute("UPDATE ThresholdPolicy SET max_excursion_minutes=9");db.commit()
+    detect_excursions(db,'S',(T0+timedelta(minutes=10)).isoformat())
+    assert db.execute("SELECT severity FROM Excursion WHERE kind='TEMP'").fetchone()[0]=='MEDIUM'
+    db.close()
+
+def test_temperature_humidity_and_invalid_context_checks(tmp_path):
+    p=setup_db(tmp_path/'contexts.db',completed=True);db=connect(p)
+    db.execute("INSERT INTO Sensor VALUES('H','C','HUM','2099-01-01T00:00:00+00:00','VALID')")
+    db.execute("INSERT INTO SensorReading VALUES('BADUNIT','X','S',?,5,'%','VALID')",(T0.isoformat(),))
+    db.execute("INSERT INTO SensorReading VALUES('H1','H','S',?,70,'%','VALID')",(T0.isoformat(),))
+    db.commit()
+    result=validate(p)
+    names={x['check']:x for x in result['checks']}
+    assert not names['sensor_kind_unit_semantics']['passed']
+    assert not names['valid_calibration_is_current_at_readings']['passed']
+    db.close()
+
+def test_tampered_ids_wrong_recovery_and_deleted_source_fail_independently(tmp_path):
+    p=setup_db(tmp_path/'tamper.db');db=connect(p)
+    for minute,value in ((0,9),(5,9),(10,5)):add_reading(db,minute,value)
+    db.commit();detect_excursions(db,'S',(T0+timedelta(minutes=10)).isoformat())
+    event=db.execute("SELECT * FROM Excursion WHERE kind='TEMP'").fetchone();evidence=json.loads(event['evidence_json'])
+    evidence['recovery_reading_id']='MISSING';db.execute('UPDATE Excursion SET evidence_json=? WHERE excursion_id=?',(json.dumps(evidence),event['excursion_id']));db.commit()
+    with pytest.raises(ValueError,match='Recovery'):check_excursion_duration(db,event['excursion_id'])
+    db.execute("DELETE FROM SensorReading WHERE reading_id='R-S-X-0'");db.commit()
+    with pytest.raises(ValueError,match='missing'):check_excursion_duration(db,event['excursion_id'])
+    db.close()
+
+def test_custody_history_actions_and_exception_closure_rules(tmp_path,monkeypatch):
+    p=setup_db(tmp_path/'history.db',completed=True)
+    import services.corrective_actions as actions,services.excursion_status as statuses,services.lifecycle as lifecycle
+    monkeypatch.setattr(actions,'transaction',lambda path=None:transaction(p));monkeypatch.setattr(statuses,'transaction',lambda path=None:transaction(p));monkeypatch.setattr(lifecycle,'transaction',lambda path=None:transaction(p))
+    with transaction(p) as db:
+        db.execute("INSERT INTO Excursion VALUES('E','S',NULL,'ROUTE_DELAY',?,NULL,0,'MEDIUM','OPEN','{}')",(T0.isoformat(),))
+        db.execute("INSERT INTO CorrectiveAction VALUES('A','E','Team','REVIEW','review',?,NULL,'OPEN','')",(T0.isoformat(),))
+    update_action('A','IN_PROGRESS');update_action('A','COMPLETED','Evidence reviewed')
+    with pytest.raises(ValueError):update_action('A','COMPLETED','Replacement')
+    update_excursion_status('E','ACKNOWLEDGED','Reviewed');update_excursion_status('E','CLOSED','Action evidence A')
+    add_custody_event('S','Origin','DEPARTURE','Origin',T0.isoformat())
+    add_custody_event('S','Destination','DELIVERY','Destination',(T0+timedelta(minutes=20)).isoformat())
+    db=connect(p)
+    assert db.execute("SELECT COUNT(*) FROM CorrectiveActionEvent WHERE action_id='A'").fetchone()[0]>=2
+    assert db.execute("SELECT COUNT(*) FROM ExcursionStatusEvent WHERE excursion_id='E'").fetchone()[0]==2
+    db.commit();detect_excursions(db,'S',(T0+timedelta(minutes=20)).isoformat())
+    assert validate(p)['status']=='PASS'
     db.close()
