@@ -1,78 +1,90 @@
-"""Shipment condition outcomes; compliance requires complete, trusted evidence."""
-from datetime import timedelta, datetime, timezone
+"""Shipment outcomes based on complete evidence and a current successful analysis."""
+import json
+from datetime import timedelta
 
 from config import EXPECTED_INTERVAL_MINUTES
-from services.engine import parse_time, CalibrationResolver
+from services.engine import (CalibrationResolver, PolicyResolver, REQUIRED_MODALITIES,
+                             analysis_fingerprint, observation_window, parse_time,
+                             reading_trust)
+
+
+def _assigned_sensors(db, shipment_id, start, end):
+    return db.execute('SELECT s.sensor_id,s.kind,a.started_at,a.ended_at FROM ContainerAssignment a '
+                      'JOIN Sensor s USING(container_id) WHERE a.shipment_id=? AND a.started_at<=? '
+                      'AND (a.ended_at IS NULL OR a.ended_at>=?) ORDER BY s.kind,s.sensor_id',
+                      (shipment_id, end.isoformat(), start.isoformat())).fetchall()
 
 
 def assess_shipment(db, shipment_id, as_of=None):
     shipment = db.execute('SELECT * FROM Shipment WHERE shipment_id=?', (shipment_id,)).fetchone()
     if not shipment:
         raise ValueError('Shipment not found')
-    start = parse_time(shipment['actual_departure'] or shipment['planned_departure'])
+    start, end = observation_window(db, shipment, as_of)
     completed = shipment['status'] in {'DELIVERED', 'CLOSED'} and shipment['actual_arrival'] is not None
-    if completed:
-        end = parse_time(shipment['actual_arrival'])
-    elif as_of:
-        end = min(parse_time(as_of), parse_time(shipment['planned_arrival']))
-    else:
-        saved=db.execute('SELECT observed_through FROM MonitoringWindow WHERE shipment_id=?',(shipment_id,)).fetchone()
-        end=parse_time(saved['observed_through']) if saved else min(datetime.now(timezone.utc),parse_time(shipment['planned_arrival']))
-    sensors = db.execute('SELECT DISTINCT x.sensor_id,x.kind FROM ContainerAssignment a '
-                         'JOIN Sensor x USING(container_id) WHERE a.shipment_id=? AND a.started_at<=? '
-                         'AND (a.ended_at IS NULL OR a.ended_at>=?)',
-                         (shipment_id, end.isoformat(), start.isoformat())).fetchall()
-    issues = [];calibrations=CalibrationResolver(db)
-    policies = db.execute('SELECT effective_from,effective_to FROM ThresholdPolicy WHERE product_id=?',
-                          (shipment['product_id'],)).fetchall()
+    issues = []
     expected_total = received_total = 0
-    if not sensors:
-        issues.append('NO_VALID_SENSOR_ASSIGNMENT')
     if end < start:
         issues.append('INVALID_OBSERVATION_WINDOW')
     else:
-        expected_per_sensor = int((end-start).total_seconds() // (EXPECTED_INTERVAL_MINUTES*60)) + 1
-        expected_total = expected_per_sensor * len(sensors)
-        for sensor in sensors:
-            unit = 'C' if sensor['kind'] == 'TEMP' else '%'
-            readings = db.execute('SELECT recorded_at,value,unit,quality FROM SensorReading '
-                                  'WHERE shipment_id=? AND sensor_id=? AND recorded_at>=? AND recorded_at<=?',
-                                  (shipment_id, sensor['sensor_id'], start.isoformat(), end.isoformat())).fetchall()
-            valid_slots = set()
-            for r in readings:
-                at = parse_time(r['recorded_at'])
-                offset = (at-start).total_seconds()
-                slot = round(offset/(EXPECTED_INTERVAL_MINUTES*60))
-                aligned = abs(offset-slot*EXPECTED_INTERVAL_MINUTES*60) <= 1
-                physical = (-80 <= r['value'] <= 100) if sensor['kind'] == 'TEMP' else (0 <= r['value'] <= 100)
-                trusted = (aligned and r['quality'] == 'VALID' and r['unit'] == unit and physical and
-                           calibrations.valid(sensor['sensor_id'], r['recorded_at']))
-                if trusted:
-                    valid_slots.add(slot)
-            received_total += len(valid_slots)
-            if len(valid_slots) != expected_per_sensor:
-                issues.append('INCOMPLETE_SENSOR_COVERAGE:'+sensor['sensor_id'])
-            if not calibrations.valid(sensor['sensor_id'], start.isoformat()):
-                issues.append('INVALID_CALIBRATION:'+sensor['sensor_id'])
-            # Every expected instant must have exactly one effective policy.
-            if not policies:
-                issues.append('MISSING_POLICY')
-                continue
-            cursor = start
-            while cursor <= end:
-                active = sum(1 for p in policies if parse_time(p['effective_from']) <= cursor and
-                             (p['effective_to'] is None or cursor < parse_time(p['effective_to'])))
-                if active != 1:
-                    issues.append('AMBIGUOUS_OR_MISSING_POLICY')
-                    break
-                cursor += timedelta(minutes=EXPECTED_INTERVAL_MINUTES)
+        sensors = _assigned_sensors(db, shipment_id, start, end)
+        by_kind = {kind: [s for s in sensors if s['kind'] == kind] for kind in REQUIRED_MODALITIES}
+        readings = db.execute('SELECT r.*,s.kind FROM SensorReading r JOIN Sensor s USING(sensor_id) '
+                              'WHERE r.shipment_id=? AND r.recorded_at>=? AND r.recorded_at<=? '
+                              'ORDER BY r.recorded_at,r.sensor_id',
+                              (shipment_id, start.isoformat(), end.isoformat())).fetchall()
+        at_sensor = {(r['recorded_at'], r['sensor_id']): r for r in readings}
+        calibrations = CalibrationResolver(db)
+        policies = PolicyResolver(db)
+        cursor = start
+        while cursor <= end:
+            expected_total += len(REQUIRED_MODALITIES)
+            try:
+                policies.at(shipment['product_id'], cursor.isoformat())
+            except ValueError:
+                issues.append('AMBIGUOUS_OR_MISSING_POLICY')
+            for kind in REQUIRED_MODALITIES:
+                active = [s for s in by_kind[kind]
+                          if parse_time(s['started_at']) <= cursor and
+                          (s['ended_at'] is None or cursor <= parse_time(s['ended_at']))]
+                if not active:
+                    issues.append('MISSING_REQUIRED_MODALITY:'+kind)
+                    continue
+                covered = False
+                for sensor in active:
+                    reading = at_sensor.get((cursor.isoformat(), sensor['sensor_id']))
+                    if reading and reading_trust(db, reading, kind, start, calibrations)[0]:
+                        covered = True
+                        break
+                if covered:
+                    received_total += 1
+                else:
+                    issues.append('INCOMPLETE_MODALITY_COVERAGE:'+kind)
+            cursor += timedelta(minutes=EXPECTED_INTERVAL_MINUTES)
+
+    if completed:
+        analysis = db.execute('SELECT * FROM DetectionAnalysis WHERE shipment_id=?',
+                              (shipment_id,)).fetchone()
+        current_hash = analysis_fingerprint(db, shipment_id, end.isoformat())
+        if not analysis:
+            issues.append('ANALYSIS_NOT_RUN')
+        elif analysis['status'] != 'SUCCESS':
+            issues.append('ANALYSIS_'+analysis['status'])
+        elif analysis['observation_end'] != end.isoformat() or analysis['source_hash'] != current_hash:
+            issues.append('ANALYSIS_STALE')
+
     if not completed:
         outcome = 'NOT_YET_ASSESSED'
     elif issues:
         outcome = 'INCOMPLETE_EVIDENCE'
     else:
-        severe = db.execute("SELECT 1 FROM Excursion WHERE shipment_id=? AND kind IN ('TEMP','HUM') "
-                            "AND severity IN ('MEDIUM','HIGH','CRITICAL') LIMIT 1", (shipment_id,)).fetchone()
+        severe = False
+        for row in db.execute("SELECT severity,evidence_json FROM Excursion WHERE shipment_id=? "
+                              "AND kind IN ('TEMP','HUM') AND severity IN ('MEDIUM','HIGH','CRITICAL')",
+                              (shipment_id,)):
+            evidence = json.loads(row['evidence_json'] or '{}')
+            if evidence.get('condition_active', True):
+                severe = True
+                break
         outcome = 'NON_COMPLIANT' if severe else 'COMPLIANT'
     return {'shipment_id': shipment_id, 'outcome': outcome, 'completed': completed,
             'observation_start': start.isoformat(), 'observation_end': end.isoformat(),
@@ -90,4 +102,5 @@ def assess_all(db, as_of=None):
     return {'outcomes': outcomes, 'counts': counts,
             'eligible_shipments': len(outcomes),
             'assessed_shipments': counts['COMPLIANT']+counts['NON_COMPLIANT'],
-            'compliance_percentage': round(100*counts['COMPLIANT']/len(outcomes), 2) if outcomes else 0}
+            'compliance_percentage': round(100*counts['COMPLIANT']/len(outcomes), 2) if outcomes else 0,
+            'compliance_denominator': 'all shipments, including provisional and incomplete evidence'}

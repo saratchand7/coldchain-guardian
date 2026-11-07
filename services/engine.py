@@ -8,6 +8,7 @@ from database import connection_path, transaction
 
 INTERVAL_MINUTES = EXPECTED_INTERVAL_MINUTES
 PHYSICAL_RANGES = {'TEMP': (-80.0, 100.0), 'HUM': (0.0, 100.0)}
+REQUIRED_MODALITIES = ('TEMP', 'HUM')
 
 
 def parse_time(value):
@@ -57,6 +58,85 @@ class CalibrationResolver:
         return status=='VALID' and timedelta(0)<=age<=timedelta(days=CALIBRATION_VALIDITY_DAYS)
 
 
+def observation_window(db, shipment, as_of=None):
+    """Return the authoritative monitoring window; planned arrival never truncates evidence."""
+    start = parse_time(shipment['actual_departure'] or shipment['planned_departure'])
+    if shipment['actual_arrival']:
+        end = parse_time(shipment['actual_arrival'])
+    elif as_of:
+        end = parse_time(as_of)
+    else:
+        saved = db.execute('SELECT observed_through FROM MonitoringWindow WHERE shipment_id=?',
+                           (shipment['shipment_id'],)).fetchone()
+        latest = db.execute('SELECT MAX(recorded_at) FROM SensorReading WHERE shipment_id=?',
+                            (shipment['shipment_id'],)).fetchone()[0]
+        end = parse_time(saved['observed_through']) if saved else (parse_time(latest) if latest else start)
+    return start, end
+
+
+def sensor_assignment_intervals(db, shipment_id, sensor_id, start, end):
+    rows = db.execute('SELECT a.started_at,a.ended_at FROM ContainerAssignment a '
+                      'JOIN Sensor s USING(container_id) WHERE a.shipment_id=? AND s.sensor_id=? '
+                      'AND a.started_at<=? AND (a.ended_at IS NULL OR a.ended_at>=?) '
+                      'ORDER BY a.started_at',
+                      (shipment_id, sensor_id, end.isoformat(), start.isoformat())).fetchall()
+    return [(max(start, parse_time(r['started_at'])),
+             min(end, parse_time(r['ended_at'])) if r['ended_at'] else end) for r in rows]
+
+
+def reading_trust(db, reading, kind, window_start, calibration_resolver=None,
+                  require_assignment=True):
+    """One trust predicate shared by detection, gap analysis and assessment."""
+    expected_unit = 'C' if kind == 'TEMP' else '%'
+    at = parse_time(reading['recorded_at'])
+    offset = (at-window_start).total_seconds()
+    slot = round(offset/(INTERVAL_MINUTES*60))
+    if abs(offset-slot*INTERVAL_MINUTES*60) > 1:
+        return False, 'OFF_GRID_OBSERVATION'
+    low, high = PHYSICAL_RANGES[kind]
+    if not low <= float(reading['value']) <= high:
+        return False, 'INVALID_PHYSICAL_RANGE'
+    if reading['quality'] != 'VALID':
+        return False, 'INVALID_OBSERVATION'
+    if reading['unit'] != expected_unit:
+        return False, 'UNTRUSTED_OBSERVATION'
+    calibration_resolver = calibration_resolver or CalibrationResolver(db)
+    if not calibration_resolver.valid(reading['sensor_id'], reading['recorded_at']):
+        return False, 'UNTRUSTED_OBSERVATION'
+    if require_assignment:
+        assigned = db.execute('SELECT 1 FROM ContainerAssignment a JOIN Sensor s USING(container_id) '
+                              'WHERE a.shipment_id=? AND s.sensor_id=? AND a.started_at<=? '
+                              'AND (a.ended_at IS NULL OR a.ended_at>=?)',
+                              (reading['shipment_id'], reading['sensor_id'], reading['recorded_at'],
+                               reading['recorded_at'])).fetchone()
+        if not assigned:
+            return False, 'UNTRUSTED_OBSERVATION'
+    return True, 'VALID'
+
+
+def analysis_fingerprint(db, shipment_id, observation_end):
+    """Hash every input that can change the detector's decision for a shipment."""
+    digest = hashlib.sha256()
+    digest.update(str(observation_end).encode())
+    queries = [
+        ('SELECT * FROM Shipment WHERE shipment_id=? ORDER BY shipment_id', (shipment_id,)),
+        ('SELECT * FROM ContainerAssignment WHERE shipment_id=? ORDER BY assignment_id', (shipment_id,)),
+        ('SELECT s.* FROM Sensor s JOIN ContainerAssignment a USING(container_id) '
+         'WHERE a.shipment_id=? ORDER BY s.sensor_id', (shipment_id,)),
+        ('SELECT h.* FROM SensorCalibrationHistory h JOIN Sensor s USING(sensor_id) '
+         'JOIN ContainerAssignment a USING(container_id) WHERE a.shipment_id=? '
+         'ORDER BY h.sensor_id,h.calibrated_at', (shipment_id,)),
+        ('SELECT r.* FROM SensorReading r WHERE r.shipment_id=? AND r.recorded_at<=? '
+         'ORDER BY r.recorded_at,r.sensor_id,r.reading_id', (shipment_id, str(observation_end))),
+        ('SELECT p.* FROM ThresholdPolicy p JOIN Shipment s ON s.product_id=p.product_id '
+         'WHERE s.shipment_id=? ORDER BY p.effective_from,p.policy_id', (shipment_id,)),
+    ]
+    for sql, params in queries:
+        for row in db.execute(sql, params):
+            digest.update(json.dumps(dict(row), sort_keys=True, separators=(',', ':')).encode())
+    return digest.hexdigest()
+
+
 def validate_policy_product(db, shipment_id, policy_id):
     row = db.execute('SELECT s.product_id shipment_product,p.product_id policy_product '
                      'FROM Shipment s JOIN ThresholdPolicy p ON p.policy_id=? '
@@ -91,6 +171,9 @@ def _source_hash(payload):
 def _exception(db, shipment_id, sensor_id, kind, start, end, duration, severity, evidence):
     """Upsert the current event projection and append a revision only for new evidence."""
     evidence = dict(evidence)
+    evidence['condition_active'] = True
+    evidence.pop('condition_resolution_reason', None)
+    evidence.pop('condition_resolved_at', None)
     canonical = {'shipment_id': shipment_id, 'sensor_id': sensor_id, 'kind': kind,
                  'started_at': start, 'ended_at': end,
                  'duration_minutes': round(float(duration), 4), 'severity': severity,
@@ -171,7 +254,7 @@ def detect_gaps(db, shipment_id, sensor_id, interval_minutes=INTERVAL_MINUTES,
     sensor_kind=db.execute('SELECT kind FROM Sensor WHERE sensor_id=?',(sensor_id,)).fetchone()
     if not sensor_kind:return []
     expected_unit='C' if sensor_kind['kind']=='TEMP' else '%'
-    rows = db.execute('SELECT reading_id,recorded_at,unit,quality FROM SensorReading WHERE shipment_id=? AND sensor_id=? '
+    rows = db.execute('SELECT * FROM SensorReading WHERE shipment_id=? AND sensor_id=? '
                       'AND recorded_at>=? AND recorded_at<=? ORDER BY recorded_at',
                       (shipment_id, sensor_id, start.isoformat(), end.isoformat())).fetchall()
     status_by_slot = {};off_grid=[];calibrations=CalibrationResolver(db)
@@ -183,12 +266,8 @@ def detect_gaps(db, shipment_id, sensor_id, interval_minutes=INTERVAL_MINUTES,
             off_grid.append(row)
             continue
         slot = start + timedelta(minutes=slot_no*interval_minutes)
-        if row['quality'] != 'VALID':
-            status_by_slot[slot] = 'INVALID_OBSERVATION'
-        elif row['unit'] != expected_unit or not calibrations.valid(sensor_id, row['recorded_at']):
-            status_by_slot[slot] = 'UNTRUSTED_OBSERVATION'
-        else:
-            status_by_slot[slot] = 'VALID'
+        trusted, reason = reading_trust(db, row, sensor_kind['kind'], start, calibrations)
+        status_by_slot[slot] = 'VALID' if trusted else reason
     expected = []
     current = start
     step = timedelta(minutes=interval_minutes)
@@ -229,9 +308,8 @@ def _is_expected_unit(db, sensor_id, reading):
 
 
 def _duration_from_evidence(db, row, evidence):
-    shipment=db.execute('SELECT actual_departure,actual_arrival,planned_departure,planned_arrival FROM Shipment WHERE shipment_id=?',(row['shipment_id'],)).fetchone()
-    journey_start=parse_time(shipment['actual_departure'] or shipment['planned_departure'])
-    journey_end=parse_time(shipment['actual_arrival'] or shipment['planned_arrival'])
+    shipment=db.execute('SELECT * FROM Shipment WHERE shipment_id=?',(row['shipment_id'],)).fetchone()
+    journey_start,journey_end=observation_window(db,shipment,evidence.get('assessment_as_of'))
     sources = evidence.get('readings') or []
     ids = [item.get('reading_id') for item in sources]
     if not ids or any(not rid for rid in ids) or len(ids) != len(set(ids)):
@@ -249,7 +327,8 @@ def _duration_from_evidence(db, row, evidence):
             raise ValueError('Excursion source reading is outside the shipment window')
         if r['shipment_id'] != row['shipment_id'] or r['sensor_id'] != row['sensor_id']:
             raise ValueError('Excursion evidence reading belongs to another shipment or sensor')
-        if r['quality'] != 'VALID' or not _is_expected_unit(db, row['sensor_id'], r):
+        physical = PHYSICAL_RANGES[r['kind']][0] <= float(r['value']) <= PHYSICAL_RANGES[r['kind']][1]
+        if r['quality'] != 'VALID' or not _is_expected_unit(db, row['sensor_id'], r) or not physical:
             raise ValueError('Excursion evidence contains an untrusted reading')
         if source_item.get('at') and parse_time(source_item['at'])!=parse_time(r['recorded_at']):
             raise ValueError('Serialized evidence timestamp differs from its authoritative source')
@@ -285,7 +364,10 @@ def _duration_from_evidence(db, row, evidence):
         recovery = db.execute('SELECT * FROM SensorReading WHERE reading_id=?', (recovery_id,)).fetchone()
         if not recovery or recovery['shipment_id'] != row['shipment_id'] or recovery['sensor_id'] != row['sensor_id']:
             raise ValueError('Recovery reading belongs to another shipment or sensor')
-        if recovery['quality'] != 'VALID' or not _is_expected_unit(db, row['sensor_id'], recovery):
+        recovery_kind = db.execute('SELECT kind FROM Sensor WHERE sensor_id=?',
+                                   (row['sensor_id'],)).fetchone()['kind']
+        recovery_physical = PHYSICAL_RANGES[recovery_kind][0] <= float(recovery['value']) <= PHYSICAL_RANGES[recovery_kind][1]
+        if recovery['quality'] != 'VALID' or not _is_expected_unit(db, row['sensor_id'], recovery) or not recovery_physical:
             raise ValueError('Recovery reading is not trusted')
         if not _sensor_calibration_valid(db,row['sensor_id'],recovery['recorded_at']):
             raise ValueError('Recovery calibration is invalid at reading time')
@@ -351,22 +433,40 @@ def _severity(duration, limit):
     return 'HIGH'
 
 
-def detect_excursions(db, shipment_id, as_of=None):
+def _reconcile_disappeared_conditions(db, shipment_id, current_keys, window_start, window_end):
+    """Keep audit events but mark detector conditions removed by late/current evidence."""
+    managed = ('TEMP', 'HUM', 'SENSOR_GAP', 'INVALID_PHYSICAL_RANGE', 'CALIBRATION_FAILURE')
+    marks = ','.join('?' for _ in managed)
+    rows = db.execute(f'SELECT * FROM Excursion WHERE shipment_id=? AND kind IN ({marks}) '
+                      'AND started_at>=? AND started_at<=?',
+                      (shipment_id, *managed, window_start, window_end)).fetchall()
+    for row in rows:
+        key = (row['sensor_id'], row['kind'], row['started_at'])
+        evidence = json.loads(row['evidence_json'] or '{}')
+        if key in current_keys or evidence.get('condition_active') is False:
+            continue
+        evidence['condition_active'] = False
+        evidence['condition_resolution_reason'] = 'LATE_OR_CURRENT_EVIDENCE_REMOVED_CONDITION'
+        evidence['condition_resolved_at'] = window_end
+        evidence['operational_review_status'] = row['status']
+        digest = _source_hash({'excursion_id': row['excursion_id'], 'resolution': evidence})
+        revision = db.execute('SELECT COALESCE(MAX(revision_no),0)+1 FROM ExcursionRevision '
+                              'WHERE excursion_id=?', (row['excursion_id'],)).fetchone()[0]
+        db.execute('UPDATE Excursion SET evidence_json=? WHERE excursion_id=?',
+                   (json.dumps(evidence, sort_keys=True), row['excursion_id']))
+        db.execute('INSERT OR IGNORE INTO ExcursionRevision VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                   (f"EXR-{row['excursion_id']}-{revision:06d}", row['excursion_id'], revision,
+                    window_end, row['started_at'], row['ended_at'], row['duration_minutes'],
+                    row['severity'], evidence.get('policy_id'), digest,
+                    json.dumps(evidence, sort_keys=True)))
+
+
+def _detect_excursions_impl(db, shipment_id, as_of=None):
     shipment = db.execute('SELECT * FROM Shipment WHERE shipment_id=?', (shipment_id,)).fetchone()
     if not shipment:
         raise ValueError('Shipment not found')
-    start = parse_time(shipment['actual_departure'] or shipment['planned_departure'])
-    if shipment['actual_arrival']:
-        end = parse_time(shipment['actual_arrival'])
-    elif as_of:
-        end = parse_time(as_of)
-    else:
-        saved=db.execute('SELECT observed_through FROM MonitoringWindow WHERE shipment_id=?',(shipment_id,)).fetchone()
-        latest = db.execute('SELECT MAX(recorded_at) FROM SensorReading WHERE shipment_id=?',
-                            (shipment_id,)).fetchone()[0]
-        end = parse_time(saved['observed_through']) if saved else (parse_time(latest) if latest else start)
-    end = min(end, parse_time(shipment['planned_arrival']))
-    sensors = db.execute('SELECT DISTINCT x.sensor_id,x.kind,x.calibration_status,x.calibrated_at '
+    start, end = observation_window(db, shipment, as_of)
+    sensors = db.execute('SELECT DISTINCT x.sensor_id,x.kind,x.calibration_status,x.calibrated_at,a.started_at,a.ended_at '
                          'FROM ContainerAssignment a JOIN Sensor x USING(container_id) '
                          'WHERE a.shipment_id=? AND a.started_at<=? AND (a.ended_at IS NULL OR a.ended_at>=?)',
                          (shipment_id, end.isoformat(), start.isoformat())).fetchall()
@@ -375,12 +475,16 @@ def detect_excursions(db, shipment_id, as_of=None):
         sensor = sensor_row['sensor_id']
         kind = sensor_row['kind']
         unit = 'C' if kind == 'TEMP' else '%'
+        sensor_start = max(start, parse_time(sensor_row['started_at']))
+        sensor_end = min(end, parse_time(sensor_row['ended_at'])) if sensor_row['ended_at'] else end
+        if sensor_end < sensor_start:
+            continue
         rows = db.execute('SELECT * FROM SensorReading WHERE shipment_id=? AND sensor_id=? '
                           'AND recorded_at>=? AND recorded_at<=? ORDER BY recorded_at,reading_id',
-                          (shipment_id, sensor, start.isoformat(), end.isoformat())).fetchall()
+                          (shipment_id, sensor, sensor_start.isoformat(), sensor_end.isoformat())).fetchall()
         # A calibration fault is a quality exception, while readings remain in the source table.
-        if not calibration_resolver.valid(sensor, start.isoformat()):
-            groups.append({'sensor_id': sensor, 'kind': 'CALIBRATION_FAILURE', 'start': start.isoformat(),
+        if not calibration_resolver.valid(sensor, sensor_start.isoformat()):
+            groups.append({'sensor_id': sensor, 'kind': 'CALIBRATION_FAILURE', 'start': sensor_start.isoformat(),
                            'end': None, 'duration': 0, 'severity': 'CRITICAL',
                            'evidence': {'calibrated_at': sensor_row['calibrated_at'],
                                         'calibration_status': sensor_row['calibration_status']}})
@@ -388,16 +492,13 @@ def detect_excursions(db, shipment_id, as_of=None):
         previous_at = None
         for reading in rows:
             at = parse_time(reading['recorded_at'])
-            trusted = reading['quality'] == 'VALID' and reading['unit'] == unit and \
-                      calibration_resolver.valid(sensor, reading['recorded_at'])
+            trusted, trust_reason = reading_trust(db, reading, kind, sensor_start, calibration_resolver)
             # A missing/invalid interval censors the current run before this reading is handled.
             if active and (not trusted or at-previous_at > timedelta(minutes=INTERVAL_MINUTES)):
-                groups.append(_finish_segment(active, None, None, end, 'GAP_OR_INVALID_OBSERVATION'))
+                groups.append(_finish_segment(active, None, None, sensor_end, 'GAP_OR_INVALID_OBSERVATION'))
                 active = None
             if not trusted:
-                if reading['quality'] == 'INVALID_PHYSICAL_RANGE' or \
-                   (reading['unit'] == unit and ((kind == 'TEMP' and not -80 <= reading['value'] <= 100) or
-                                                  (kind == 'HUM' and not 0 <= reading['value'] <= 100))):
+                if trust_reason == 'INVALID_PHYSICAL_RANGE':
                     groups.append({'sensor_id': sensor, 'kind': 'INVALID_PHYSICAL_RANGE',
                                    'start': reading['recorded_at'], 'end': reading['recorded_at'],
                                    'duration': 0, 'severity': 'CRITICAL',
@@ -415,7 +516,7 @@ def detect_excursions(db, shipment_id, as_of=None):
             if violation:
                 if active is None or active['policy_id'] != policy['policy_id']:
                     if active:
-                        groups.append(_finish_segment(active, None, None, end, 'POLICY_CHANGE'))
+                        groups.append(_finish_segment(active, None, None, sensor_end, 'POLICY_CHANGE'))
                     active = {'sensor_id': sensor, 'kind': kind, 'start': reading['recorded_at'],
                               'last': reading['recorded_at'], 'limit': policy['max_excursion_minutes'],
                               'policy_id': policy['policy_id'], 'low': low, 'high': high, 'readings': []}
@@ -423,12 +524,12 @@ def detect_excursions(db, shipment_id, as_of=None):
                 active['readings'].append({'reading_id': reading['reading_id'], 'value': reading['value'],
                                            'at': reading['recorded_at']})
             elif active:
-                groups.append(_finish_segment(active, reading['recorded_at'], reading['reading_id'], end))
+                groups.append(_finish_segment(active, reading['recorded_at'], reading['reading_id'], sensor_end))
                 active = None
             previous_at = at
         if active:
-            groups.append(_finish_segment(active, None, None, end))
-        for gap in detect_gaps(db, shipment_id, sensor, window_start=start.isoformat(), window_end=end.isoformat()):
+            groups.append(_finish_segment(active, None, None, sensor_end))
+        for gap in detect_gaps(db, shipment_id, sensor, window_start=sensor_start.isoformat(), window_end=sensor_end.isoformat()):
             groups.append({'sensor_id': sensor, 'kind': 'SENSOR_GAP', 'start': gap['start'], 'end': gap['end'],
                            'duration': gap['duration_minutes'], 'severity': 'HIGH', 'evidence': gap})
     for stop in db.execute("SELECT * FROM RouteStop WHERE shipment_id=? AND (status='DELAYED' OR (actual_at IS NOT NULL AND actual_at>planned_at))",
@@ -445,6 +546,7 @@ def detect_excursions(db, shipment_id, as_of=None):
         if not shipment['actual_arrival']:
             out.execute('INSERT INTO MonitoringWindow VALUES(?,?,?,?,?) ON CONFLICT(shipment_id) DO UPDATE SET observed_through=excluded.observed_through,updated_at=excluded.updated_at,source=excluded.source',
                         (shipment_id,start.isoformat(),end.isoformat(),end.isoformat(),'detector assessment horizon'))
+        current_keys = set()
         for group in groups:
             evidence = group.get('evidence')
             if evidence is None:
@@ -462,10 +564,42 @@ def detect_excursions(db, shipment_id, as_of=None):
             else:
                 duration = group['duration']
                 severity = group['severity']
+            current_keys.add((group['sensor_id'], group['kind'], group['start']))
             ids.append(_exception(out, shipment_id, group['sensor_id'], group['kind'], group['start'],
                                   group.get('recovery') or (group.get('end') if group.get('censor_reason') not in (None,'END_OF_OBSERVATION_WINDOW') else None),
                                   duration, severity, evidence))
+        _reconcile_disappeared_conditions(out, shipment_id, current_keys,
+                                          start.isoformat(), end.isoformat())
     return sorted(set(ids))
+
+
+def _record_analysis(db, shipment_id, status, start, end, source_hash=None, error=''):
+    db.execute('INSERT INTO DetectionAnalysis VALUES(?,?,?,?,?,?,?) '
+               'ON CONFLICT(shipment_id) DO UPDATE SET status=excluded.status,'
+               'observation_start=excluded.observation_start,observation_end=excluded.observation_end,'
+               'source_hash=excluded.source_hash,completed_at=excluded.completed_at,error_message=excluded.error_message',
+               (shipment_id, status, start.isoformat(), end.isoformat(), source_hash,
+                iso_now() if status != 'RUNNING' else None, error[:1000]))
+
+
+def detect_excursions(db, shipment_id, as_of=None):
+    """Run detection and persist freshness/failure state for compliance assessment."""
+    shipment = db.execute('SELECT * FROM Shipment WHERE shipment_id=?', (shipment_id,)).fetchone()
+    if not shipment:
+        raise ValueError('Shipment not found')
+    start, end = observation_window(db, shipment, as_of)
+    with transaction(connection_path(db)) as out:
+        _record_analysis(out, shipment_id, 'RUNNING', start, end)
+    try:
+        ids = _detect_excursions_impl(db, shipment_id, as_of)
+        source_hash = analysis_fingerprint(db, shipment_id, end.isoformat())
+        with transaction(connection_path(db)) as out:
+            _record_analysis(out, shipment_id, 'SUCCESS', start, end, source_hash)
+        return ids
+    except Exception as exc:
+        with transaction(connection_path(db)) as out:
+            _record_analysis(out, shipment_id, 'FAILED', start, end, error=str(exc))
+        raise
 
 
 def _finish_segment(active, recovery_at, recovery_id, window_end, censor_reason=None):

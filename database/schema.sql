@@ -30,6 +30,12 @@ CREATE TABLE IF NOT EXISTS MonitoringWindow (
  updated_at TEXT NOT NULL, source TEXT NOT NULL,
  CHECK(observed_through >= observation_start)
 );
+CREATE TABLE IF NOT EXISTS DetectionAnalysis (
+ shipment_id TEXT PRIMARY KEY REFERENCES Shipment(shipment_id),
+ status TEXT NOT NULL CHECK(status IN ('RUNNING','SUCCESS','FAILED')),
+ observation_start TEXT NOT NULL, observation_end TEXT NOT NULL,
+ source_hash TEXT, completed_at TEXT, error_message TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS Sensor (
  sensor_id TEXT PRIMARY KEY, container_id TEXT NOT NULL REFERENCES Container(container_id),
  kind TEXT NOT NULL CHECK(kind IN ('TEMP','HUM')), calibrated_at TEXT NOT NULL,

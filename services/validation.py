@@ -5,7 +5,8 @@ import csv, json, hashlib
 from config import BASE_DIR, GENERATED, DATABASE, MANIFEST, REPORTS_DIR
 from database import connect
 from services.engine import (detect_gaps, _duration_from_evidence, parse_time,
-                              CalibrationResolver, PolicyResolver, INTERVAL_MINUTES)
+                              CalibrationResolver, PolicyResolver, INTERVAL_MINUTES,
+                              analysis_fingerprint, observation_window)
 
 
 def _check(checks, name, count, detail=None, severity='error'):
@@ -26,9 +27,11 @@ def validate(path=None,include_artifacts=False):
       AND (a.ended_at IS NULL OR a.ended_at>=r.recorded_at))""").fetchone()[0]
     _check(checks,'reading_sensor_shipment_assignment',unassigned)
     outside=0
-    for r in db.execute('SELECT r.recorded_at,s.actual_departure,s.actual_arrival,s.planned_departure,s.planned_arrival FROM SensorReading r JOIN Shipment s USING(shipment_id)'):
-        start=r['actual_departure'] or r['planned_departure'];end=r['actual_arrival'] or r['planned_arrival']
-        if parse_time(r['recorded_at'])<parse_time(start) or parse_time(r['recorded_at'])>parse_time(end):outside+=1
+    windows={}
+    for r in db.execute('SELECT r.recorded_at,s.* FROM SensorReading r JOIN Shipment s USING(shipment_id)'):
+        if r['shipment_id'] not in windows:windows[r['shipment_id']]=observation_window(db,r)
+        start,end=windows[r['shipment_id']]
+        if parse_time(r['recorded_at'])<start or parse_time(r['recorded_at'])>end:outside+=1
     _check(checks,'reading_within_shipment_timeline',outside)
     bad_range=db.execute("""SELECT COUNT(*) FROM SensorReading r JOIN Sensor s USING(sensor_id) WHERE r.quality='VALID'
       AND ((s.kind='TEMP' AND (r.unit!='C' OR r.value < -80 OR r.value > 100))
@@ -114,6 +117,20 @@ def validate(path=None,include_artifacts=False):
             if not found:gap_missing+=1
     _check(checks,'expected_sensor_coverage_spans_persisted',gap_missing)
     _check(checks,'missing_or_invalid_expected_slots_visible',0,detail=f'{coverage_slots} expected slots are missing, invalid, or untrusted',severity='warning')
+    # Compliance is only possible after successful detection against the current source horizon.
+    stale_analysis=0;missing_modalities=0
+    from services.assessment import assess_shipment
+    for shipment in db.execute('SELECT * FROM Shipment'):
+        start,end=observation_window(db,shipment)
+        analysis=db.execute('SELECT * FROM DetectionAnalysis WHERE shipment_id=?',(shipment['shipment_id'],)).fetchone()
+        if not analysis or analysis['status']!='SUCCESS' or analysis['observation_end']!=end.isoformat() or \
+           analysis['source_hash']!=analysis_fingerprint(db,shipment['shipment_id'],end.isoformat()):
+            stale_analysis+=1
+        outcome=assess_shipment(db,shipment['shipment_id'])
+        if any(issue.startswith('MISSING_REQUIRED_MODALITY:') for issue in outcome['issues']):
+            missing_modalities+=1
+    _check(checks,'current_successful_detection_analysis',stale_analysis)
+    _check(checks,'required_temp_and_humidity_evidence',missing_modalities)
     # Custody ingestion order, party chain, departure and delivery facts.
     custody_errors=0
     for sh in db.execute('SELECT shipment_id,actual_departure,actual_arrival FROM Shipment'):
@@ -147,13 +164,14 @@ def validate(path=None,include_artifacts=False):
                 if a['new_status']!=b['previous_status']:history_errors+=1
     _check(checks,'status_history_matches_current_state',history_errors)
     # Every truth ID and embedded duration source must resolve to its labelled parent rows.
-    truth_errors=0
+    truth_errors=0;truth_items=[]
     truth_path=GENERATED/'ground_truth.json'
     isolated_db=path is not None and Path(path).resolve()!=DATABASE.resolve()
     if isolated_db:
         skipped.append('ground_truth_source_references: isolated database has no matching ground-truth artifact set')
     elif truth_path.exists():
-        for item in json.loads(truth_path.read_text(encoding='utf8')):
+        truth_items=json.loads(truth_path.read_text(encoding='utf8'))
+        for item in truth_items:
             if item.get('sensor_id') and item.get('shipment_id') and item.get('recorded_at'):
                 exists=db.execute('SELECT 1 FROM SensorReading WHERE shipment_id=? AND sensor_id=? AND recorded_at=?',(item['shipment_id'],item['sensor_id'],item['recorded_at'])).fetchone()
                 # Labels may name event starts rather than a reading if an injected point was dropped.
@@ -162,10 +180,18 @@ def validate(path=None,include_artifacts=False):
             for rid in payload.get('source_reading_ids',[]):
                 src=db.execute('SELECT shipment_id,sensor_id FROM SensorReading WHERE reading_id=?',(rid,)).fetchone()
                 if not src or src['shipment_id']!=item.get('shipment_id') or src['sensor_id']!=item.get('sensor_id'):truth_errors+=1
-    if not isolated_db:_check(checks,'ground_truth_source_references',truth_errors)
+    if not isolated_db:
+        _check(checks,'ground_truth_source_references',truth_errors)
+        expected={(x['shipment_id'],x.get('sensor_id') or '',x['expected_kind'],x['recorded_at'])
+                  for x in truth_items if x.get('expected')=='detected' and x.get('expected_kind')}
+        actual=set()
+        for event in db.execute('SELECT shipment_id,sensor_id,kind,started_at,evidence_json FROM Excursion'):
+            if json.loads(event['evidence_json'] or '{}').get('condition_active',True):
+                actual.add((event['shipment_id'],event['sensor_id'] or '',event['kind'],event['started_at']))
+        _check(checks,'ground_truth_expected_events_persisted',len(expected-actual))
     # Decision history is independently checked by the real decision rules.
     records_checked=sum(db.execute('SELECT COUNT(*) FROM "'+table+'"').fetchone()[0] for table in
-      ('Product','Shipment','Container','ContainerAssignment','MonitoringWindow','Sensor','SensorCalibrationHistory','SensorReading','RouteStop','ThresholdPolicy','Excursion','ExcursionRevision','ExcursionStatusEvent','CustodyEvent','LifecycleEvent','CorrectiveAction','CorrectiveActionEvent','Notification'))
+      ('Product','Shipment','Container','ContainerAssignment','MonitoringWindow','DetectionAnalysis','Sensor','SensorCalibrationHistory','SensorReading','RouteStop','ThresholdPolicy','Excursion','ExcursionRevision','ExcursionStatusEvent','CustodyEvent','LifecycleEvent','CorrectiveAction','CorrectiveActionEvent','Notification'))
     anomalies=[dict(r) for r in db.execute('SELECT kind,COUNT(*) count FROM Excursion GROUP BY kind ORDER BY kind')]
     if include_artifacts:
         if path is not None and Path(path).resolve()!=DATABASE.resolve():
@@ -181,7 +207,7 @@ def validate(path=None,include_artifacts=False):
                 if item['file'].endswith('.csv') or item['file'].endswith('.json'):
                     table_map={'sensorreading':'SensorReading','routestop':'RouteStop','thresholdpolicy':'ThresholdPolicy',
                                'custodyevent':'CustodyEvent','lifecycleevent':'LifecycleEvent',
-                               'monitoringwindow':'MonitoringWindow','sensorcalibrationhistory':'SensorCalibrationHistory','excursionrevision':'ExcursionRevision',
+                               'monitoringwindow':'MonitoringWindow','detectionanalysis':'DetectionAnalysis','sensorcalibrationhistory':'SensorCalibrationHistory','excursionrevision':'ExcursionRevision',
                                'excursionstatusevent':'ExcursionStatusEvent','correctiveactionevent':'CorrectiveActionEvent'}
                     table=table_map.get(Path(item['file']).stem.lower(),Path(item['file']).stem.title())
                     try: row_count=db.execute('SELECT COUNT(*) FROM "'+table+'"').fetchone()[0]

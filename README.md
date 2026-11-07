@@ -23,6 +23,8 @@ ColdChain Guardian simulates temperature and humidity readings over shipment jou
 - Temperature and humidity monitoring with separate units and product policies.
 - Effective-dated threshold policy checks, duration rules, calibration checks, and route delay detection.
 - Leading, trailing, internal, invalid, and wholly absent expected sensor observations.
+- Required TEMP and HUM modality coverage across time-bounded sensor replacements.
+- Source/policy/calibration fingerprints that prevent stale or failed detection from certifying compliance.
 - Stable excursion identities with append-only evidence revisions and status history.
 - Corrective actions with preserved status and resolution history.
 - Shipment lifecycle, route-stop, and custody records with delivery reconciliation.
@@ -69,7 +71,7 @@ python generate_data.py --scale starter --seed 20261022 --json --sql
 python generate_data.py --scale full --seed 20261022 --as-of 2026-11-07T00:00:00+00:00
 ```
 
-Readings are generated on a five-minute schedule over two-to-five-day planned trips. Completed trips use actual arrival; active trips are provisional and may use an explicit `--as-of` horizon. A run writes `run_status.json` and publishes its source manifest after validation. A non-passing validation exits with a nonzero status.
+Readings are generated on a five-minute schedule over two-to-five-day planned trips. Completed trips use actual arrival, including delivery delays beyond the plan; active overdue trips continue to an explicit or recorded observation horizon. A run writes a unique run ID and `STARTED`/`RUNNING`/`FAILED`/`COMPLETE` state to `run_status.json`. Parameters are validated before reset, and `COMPLETE` is published only after successful validation. Retrying resets the configured synthetic database; a failed retry never leaves an older `COMPLETE` marker in place.
 
 ## Run tests and validation
 
@@ -83,18 +85,20 @@ Generation writes `data/generated/validation_summary.json`, `validation_report.c
 
 Compliance has four outcomes: `COMPLIANT`, `NON_COMPLIANT`, `INCOMPLETE_EVIDENCE`, and `NOT_YET_ASSESSED`.
 
-- A completed shipment can be `COMPLIANT` only if its expected readings are present and trusted across the journey, sensor assignment and calibration are valid, and exactly one product policy covers every expected sample.
+- A completed shipment can be `COMPLIANT` only if required TEMP and HUM evidence is present and trusted across the actual journey, sensor replacement assignments and calibration are valid, exactly one product policy covers every expected sample, and a successful detector fingerprint matches the current source data and horizon.
 - A detected temperature or humidity excursion above the policy duration allowance is `NON_COMPLIANT`.
 - Missing, invalid, off-grid, stale, or untrusted observations, missing/overlapping policy, and invalid calibration keep the evidence incomplete.
 - Active trips remain provisional and do not increase completed compliance.
 
+The displayed compliance percentage uses **all shipments** as its denominator, including provisional and incomplete shipments. The dashboard therefore shows the four assessment counts and the number fully assessed beside the percentage.
+
 An excursion begins at its first violating sample and ends at its first valid recovery sample. If recovery has not arrived, the duration is censored at the last observed violating sample plus one expected interval, bounded by the assessment window. A gap breaks the run; unobserved time is not counted as measured violation. Each event retains a stable ID and appends a revision containing its source reading IDs, policy bounds and allowance, duration, severity, recovery state, and source hash. Replaying identical input creates no revision.
 
-The detector reads source database records only; it never reads ground truth. Positive event detection scores and negative-decision checks are reported separately. True negatives are unavailable because the dataset does not label every safe five-minute interval.
+The detector reads source database records only; it never reads ground truth. Evaluation requires the ground-truth artifact belonging to the same generated dataset; a custom database is not silently scored against the default file. Positive event detection scores and negative-decision checks are reported separately by event class. True negatives are unavailable because the dataset does not label every safe five-minute interval.
 
 ## Data and exports
 
-Core entities are `Product`, `Shipment`, `Container`, `Sensor`, `SensorReading`, `RouteStop`, `ThresholdPolicy`, `Excursion`, `CustodyEvent`, and `CorrectiveAction`. Supporting tables include `ContainerAssignment`, `SensorCalibrationHistory`, `ExcursionRevision`, `ExcursionStatusEvent`, `CorrectiveActionEvent`, `LifecycleEvent`, and `Notification`.
+Core entities are `Product`, `Shipment`, `Container`, `Sensor`, `SensorReading`, `RouteStop`, `ThresholdPolicy`, `Excursion`, `CustodyEvent`, and `CorrectiveAction`. Supporting tables include `ContainerAssignment`, `MonitoringWindow`, `DetectionAnalysis`, `SensorCalibrationHistory`, `ExcursionRevision`, `ExcursionStatusEvent`, `CorrectiveActionEvent`, `LifecycleEvent`, and `Notification`. `DetectionAnalysis` is operational state and its wall-clock completion timestamp is intentionally excluded from deterministic export checksums.
 
 - Schema: [`database/schema.sql`](database/schema.sql)
 - Field-level dictionary: [`docs/DATA_DICTIONARY.md`](docs/DATA_DICTIONARY.md)

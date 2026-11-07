@@ -13,5 +13,8 @@ def test_generator_reproducible(tmp_path):
                  cwd=root,check=True,capture_output=True,text=True,env=env)
   manifests.append(json.loads((data/'source_manifest.json').read_text(encoding='utf8')))
   summaries.append(json.loads((generated/'generation_summary.json').read_text(encoding='utf8')))
+  evaluation=json.loads((generated/'evaluation_summary.json').read_text(encoding='utf8'))
+  assert evaluation['detection_confusion']['FP']==0
+  assert evaluation['detection_confusion']['FN']==0
  assert manifests[0]==manifests[1]
  assert summaries[0]==summaries[1]

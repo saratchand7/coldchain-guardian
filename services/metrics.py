@@ -1,6 +1,7 @@
 """Evidence-aware compliance, availability, event and negative-decision metrics."""
 import json
-from config import GENERATED
+from pathlib import Path
+from config import GENERATED, DATABASE
 from database import connect
 from services.assessment import assess_all
 from services.lifecycle import validate_transition
@@ -81,7 +82,7 @@ def _evaluate_negative_cases(db, truth):
             'accuracy_percentage': round(100*sum(x['passed'] for x in cases)/len(cases), 2) if cases else None}
 
 
-def calculate_metrics(path=None, validate_data=True, validation_result=None, as_of=None):
+def calculate_metrics(path=None, validate_data=True, validation_result=None, as_of=None, truth_path=None):
     db = connect(path) if path else connect()
     total = db.execute('SELECT COUNT(*) FROM Shipment').fetchone()[0]
     exc_count = db.execute('SELECT COUNT(*) FROM Excursion').fetchone()[0]
@@ -91,10 +92,15 @@ def calculate_metrics(path=None, validate_data=True, validation_result=None, as_
     critical = db.execute("SELECT COUNT(*) FROM Excursion WHERE severity='CRITICAL'").fetchone()[0]
     shipment_exc = db.execute('SELECT COUNT(DISTINCT shipment_id) FROM Excursion').fetchone()[0]
     assessment = assess_all(db, as_of)
-    positive_detected = [dict(r) for r in db.execute('SELECT shipment_id,sensor_id,kind,started_at FROM Excursion')]
+    positive_detected = []
+    for row in db.execute('SELECT shipment_id,sensor_id,kind,started_at,evidence_json FROM Excursion'):
+        if json.loads(row['evidence_json'] or '{}').get('condition_active', True):
+            positive_detected.append(dict(row))
     validation = validation_result or ({'passed_checks':0,'total_checks':0} if not validate_data else None)
-    truth_path = GENERATED/'ground_truth.json'
-    truth = json.loads(truth_path.read_text(encoding='utf8')) if truth_path.exists() else []
+    if truth_path is None and (path is None or Path(path).resolve() == DATABASE.resolve()):
+        truth_path = GENERATED/'ground_truth.json'
+    truth_path = Path(truth_path) if truth_path else None
+    truth = json.loads(truth_path.read_text(encoding='utf8')) if truth_path and truth_path.exists() else []
     labelled = [x for x in truth if x.get('expected')=='detected' and x.get('expected_kind')]
     detected_keys = {(x['shipment_id'],x['sensor_id'] or '',x['kind'],x['started_at']) for x in positive_detected}
     truth_keys = {(x['shipment_id'],x.get('sensor_id') or '',x['expected_kind'],x['recorded_at']) for x in labelled}
@@ -110,6 +116,7 @@ def calculate_metrics(path=None, validate_data=True, validation_result=None, as_
     counts=assessment['counts']
     return {
       'shipment_compliance_percentage':assessment['compliance_percentage'],
+      'shipment_compliance_denominator':assessment['compliance_denominator'],
       'shipment_assessment_counts':counts,
       'eligible_shipments':assessment['eligible_shipments'],
       'assessed_shipments':assessment['assessed_shipments'],
@@ -124,4 +131,6 @@ def calculate_metrics(path=None, validate_data=True, validation_result=None, as_
       'data_integrity_percentage':round(100*validation['passed_checks']/validation['total_checks'],2) if validation['total_checks'] else None,
       'total_detected_anomalies':exc_count,'average_excursion_duration_minutes':round(average,2),
       'critical_exceptions':critical,'ground_truth_positive_events':len(labelled)
+      ,'evaluation_scope':'independently labelled positive events by class; TN unavailable'
+      ,'ground_truth_artifact':str(truth_path) if truth_path else None
     }

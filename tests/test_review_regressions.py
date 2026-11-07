@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -33,11 +36,21 @@ def add_reading(db,minute,value,quality='VALID',sensor='X',shipment='S',unit='C'
     db.execute('INSERT INTO SensorReading VALUES(?,?,?,?,?,?,?)',(f'R-{shipment}-{sensor}-{minute}',sensor,shipment,at,value,unit,quality))
     return at
 
+def add_humidity_sensor(db, sensor='H', container='C'):
+    db.execute('INSERT INTO Sensor VALUES(?,?,?,?,?)',
+               (sensor,container,'HUM',T0.isoformat(),'VALID'))
+
+def add_complete_dual_readings(db,end=20,temp_value=5,hum_value=50):
+    add_humidity_sensor(db)
+    for minute in range(0,end+1,5):
+        add_reading(db,minute,temp_value)
+        add_reading(db,minute,hum_value,sensor='H',unit='%')
+
 def test_no_readings_and_incomplete_sensor_never_count_as_compliant(tmp_path):
     p=setup_db(tmp_path/'empty.db',completed=True);db=connect(p)
     outcome=assess_shipment(db,'S')
     assert outcome['outcome']=='INCOMPLETE_EVIDENCE'
-    assert outcome['expected_readings']==5 and outcome['trusted_readings']==0
+    assert outcome['expected_readings']==10 and outcome['trusted_readings']==0
     db.close()
 
 def test_boundary_total_off_grid_and_active_as_of_gaps(tmp_path):
@@ -141,6 +154,82 @@ def test_custody_history_actions_and_exception_closure_rules(tmp_path,monkeypatc
     db=connect(p)
     assert db.execute("SELECT COUNT(*) FROM CorrectiveActionEvent WHERE action_id='A'").fetchone()[0]>=2
     assert db.execute("SELECT COUNT(*) FROM ExcursionStatusEvent WHERE excursion_id='E'").fetchone()[0]==2
+    db.execute("INSERT INTO Sensor VALUES('H','C','HUM','2026-01-01T00:00:00+00:00','VALID')")
+    for minute in range(0,21,5):add_reading(db,minute,50,sensor='H',unit='%')
     db.commit();detect_excursions(db,'S',(T0+timedelta(minutes=20)).isoformat())
     assert validate(p)['status']=='PASS'
     db.close()
+
+def test_compliance_requires_current_successful_detection(tmp_path):
+    p=setup_db(tmp_path/'fresh.db',completed=True);db=connect(p)
+    add_complete_dual_readings(db,temp_value=9);db.commit()
+    before=assess_shipment(db,'S')
+    assert before['outcome']=='INCOMPLETE_EVIDENCE' and 'ANALYSIS_NOT_RUN' in before['issues']
+    detect_excursions(db,'S')
+    assert assess_shipment(db,'S')['outcome']=='NON_COMPLIANT'
+    db.execute("UPDATE SensorReading SET value=5 WHERE sensor_id='X'");db.commit();detect_excursions(db,'S')
+    assert assess_shipment(db,'S')['outcome']=='COMPLIANT'
+    add_reading(db,17,9);db.commit()
+    assert 'ANALYSIS_STALE' in assess_shipment(db,'S')['issues']
+    db.execute("INSERT INTO ThresholdPolicy VALUES('POL2','P','2025-01-01T00:00:00+00:00',NULL,2,8,30,60,10)");db.commit()
+    with pytest.raises(ValueError):detect_excursions(db,'S')
+    assert db.execute("SELECT status FROM DetectionAnalysis WHERE shipment_id='S'").fetchone()[0]=='FAILED'
+    assert assess_shipment(db,'S')['outcome']=='INCOMPLETE_EVIDENCE';db.close()
+
+def test_delayed_and_active_overdue_windows_continue_past_plan(tmp_path):
+    p=setup_db(tmp_path/'delayed.db',completed=True);db=connect(p);end40=T0+timedelta(minutes=40)
+    db.execute("UPDATE Shipment SET planned_arrival=?,actual_arrival=? WHERE shipment_id='S'",
+               ((T0+timedelta(minutes=20)).isoformat(),end40.isoformat()))
+    db.execute("UPDATE ContainerAssignment SET ended_at=? WHERE shipment_id='S'",(end40.isoformat(),));add_humidity_sensor(db)
+    for minute in range(0,41,5):
+        add_reading(db,minute,5 if minute<=20 else 9)
+        if minute!=30:add_reading(db,minute,50,sensor='H',unit='%')
+    db.commit();detect_excursions(db,'S')
+    assert db.execute("SELECT 1 FROM Excursion WHERE kind='TEMP' AND started_at=?",((T0+timedelta(minutes=25)).isoformat(),)).fetchone()
+    assert db.execute("SELECT 1 FROM Excursion WHERE kind='SENSOR_GAP' AND sensor_id='H' AND started_at=?",((T0+timedelta(minutes=30)).isoformat(),)).fetchone()
+    assert assess_shipment(db,'S')['outcome']=='INCOMPLETE_EVIDENCE';db.close()
+    p=setup_db(tmp_path/'overdue.db');db=connect(p);add_humidity_sensor(db)
+    for minute in range(0,41,5):
+        add_reading(db,minute,5 if minute<=20 else 9);add_reading(db,minute,50,sensor='H',unit='%')
+    db.commit();detect_excursions(db,'S',(T0+timedelta(minutes=40)).isoformat())
+    assert db.execute("SELECT 1 FROM Excursion WHERE kind='TEMP' AND started_at=?",((T0+timedelta(minutes=25)).isoformat(),)).fetchone()
+    assert db.execute("SELECT observed_through FROM MonitoringWindow WHERE shipment_id='S'").fetchone()[0]==(T0+timedelta(minutes=40)).isoformat();db.close()
+
+def test_required_modalities_and_timed_replacements(tmp_path):
+    p=setup_db(tmp_path/'missing-hum.db',completed=True);db=connect(p)
+    for minute in range(0,21,5):add_reading(db,minute,5)
+    db.commit();detect_excursions(db,'S');result=assess_shipment(db,'S')
+    assert result['outcome']=='INCOMPLETE_EVIDENCE' and 'MISSING_REQUIRED_MODALITY:HUM' in result['issues'];db.close()
+    p=setup_db(tmp_path/'replacement.db',completed=True);db=connect(p)
+    db.execute("UPDATE ContainerAssignment SET ended_at=?",((T0+timedelta(minutes=10)).isoformat(),));add_humidity_sensor(db)
+    db.execute("INSERT INTO Container VALUES('C2','box','AVAILABLE')")
+    db.execute("INSERT INTO Sensor VALUES('X2','C2','TEMP',?,'VALID')",(T0.isoformat(),))
+    db.execute("INSERT INTO Sensor VALUES('H2','C2','HUM',?,'VALID')",(T0.isoformat(),))
+    db.execute("INSERT INTO ContainerAssignment VALUES('AS2','C2','S',?,?)",((T0+timedelta(minutes=15)).isoformat(),(T0+timedelta(minutes=20)).isoformat()))
+    for minute in (0,5,10):add_reading(db,minute,5);add_reading(db,minute,50,sensor='H',unit='%')
+    for minute in (15,20):add_reading(db,minute,5,sensor='X2');add_reading(db,minute,50,sensor='H2',unit='%')
+    db.commit();detect_excursions(db,'S');assert assess_shipment(db,'S')['outcome']=='COMPLIANT';db.close()
+
+def test_impossible_valid_value_and_late_gap_reconciliation(tmp_path):
+    p=setup_db(tmp_path/'physical.db',completed=True);db=connect(p);add_complete_dual_readings(db)
+    db.execute("UPDATE SensorReading SET value=150,quality='VALID' WHERE sensor_id='X' AND recorded_at=?",((T0+timedelta(minutes=10)).isoformat(),));db.commit();detect_excursions(db,'S')
+    assert db.execute("SELECT 1 FROM Excursion WHERE kind='INVALID_PHYSICAL_RANGE'").fetchone()
+    assert not db.execute("SELECT 1 FROM Excursion WHERE kind='TEMP'").fetchone();db.close()
+    p=setup_db(tmp_path/'late.db',completed=True);db=connect(p);add_humidity_sensor(db)
+    for minute in (0,5,15,20):add_reading(db,minute,5)
+    for minute in range(0,21,5):add_reading(db,minute,50,sensor='H',unit='%')
+    db.commit();detect_excursions(db,'S');gap=db.execute("SELECT * FROM Excursion WHERE kind='SENSOR_GAP' AND sensor_id='X'").fetchone()
+    add_reading(db,10,5);db.commit();detect_excursions(db,'S')
+    evidence=json.loads(db.execute('SELECT evidence_json FROM Excursion WHERE excursion_id=?',(gap['excursion_id'],)).fetchone()[0])
+    assert evidence['condition_active'] is False and evidence['condition_resolution_reason']=='LATE_OR_CURRENT_EVIDENCE_REMOVED_CONDITION'
+    assert db.execute('SELECT COUNT(*) FROM ExcursionRevision WHERE excursion_id=?',(gap['excursion_id'],)).fetchone()[0]>=2
+    assert assess_shipment(db,'S')['outcome']=='COMPLIANT';db.close()
+
+def test_failed_generator_attempt_replaces_complete_status(tmp_path):
+    root=__import__('pathlib').Path(__file__).resolve().parents[1];data=tmp_path/'run';env=os.environ.copy()
+    env.update({'COLDCHAIN_DB':str(data/'coldchain.db'),'COLDCHAIN_GENERATED_DIR':str(data/'generated'),
+                'COLDCHAIN_MANIFEST':str(data/'source_manifest.json'),'COLDCHAIN_REPORTS_DIR':str(data/'reports')})
+    subprocess.run([sys.executable,'generate_data.py','--scale','starter'],cwd=root,env=env,check=True,capture_output=True,text=True)
+    failed=subprocess.run([sys.executable,'generate_data.py','--as-of','not-a-timestamp'],cwd=root,env=env,capture_output=True,text=True)
+    status=json.loads((data/'run_status.json').read_text())
+    assert failed.returncode!=0 and status['status']=='FAILED' and status['stage']=='ARGUMENT_VALIDATION'

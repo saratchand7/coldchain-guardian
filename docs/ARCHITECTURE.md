@@ -4,6 +4,8 @@ The browser loads Flask-rendered pages and calls JSON endpoints. Flask validates
 
 Synthetic generation proceeds in parent-first order: products and effective policies; containers and sensors; shipments and container assignments; route stops, readings, lifecycle history, custody history; then exception detection and validation. Reading inserts use bounded batches. CSV and SQL writers stream rows to avoid holding full exports in memory. Detection does not read ground_truth.csv or ground_truth.json. Evaluation reads those labels only after detections have been stored.
 
+Detection, gap coverage, evidence verification, and assessment share the same actual/observed journey window and source-trust rules. Each successful run stores a DetectionAnalysis source fingerprint; assessment fails closed if that record is absent, failed, stale, or covers a different horizon. TEMP and HUM are required across assignment intervals, so correctly timed replacement sensors can jointly provide complete evidence. Operational run IDs and completion timestamps are kept outside deterministic business-data checksums.
+
 ## Relational relationships
 
 - Product 1:N Shipment and ThresholdPolicy.

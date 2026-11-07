@@ -1,5 +1,5 @@
 """Deterministic synthetic starter/full dataset generator."""
-import argparse,csv,hashlib,json,random,platform,subprocess,sys
+import argparse,csv,hashlib,json,random,platform,subprocess,sys,uuid
 from datetime import datetime,timedelta,timezone
 from config import BASE_DIR,GENERATED,DATABASE,MANIFEST,EXPECTED_INTERVAL_MINUTES
 from database import initialize,transaction,connect
@@ -32,11 +32,19 @@ def export_json_table(db,table):
   f.write(']\n')
  return {'file':out.name,'rows':rows,'sha256':sha256_file(out),'format':'json'}
 
-def main():
- p=argparse.ArgumentParser();p.add_argument('--scale',choices=['starter','full'],default='starter');p.add_argument('--seed',type=int,default=20261022);p.add_argument('--as-of',help='explicit UTC observation horizon for active journeys (ISO 8601)');p.add_argument('--no-detect',action='store_true',help='skip the normal post-generation detector pass');p.add_argument('--sql',action='store_true',help='also create a portable SQL seed file');p.add_argument('--json',action='store_true',help='also export each generated table as JSON');a=p.parse_args();a.detect=not a.no_detect;rng=random.Random(a.seed);initialize();GENERATED.mkdir(parents=True,exist_ok=True);MANIFEST.parent.mkdir(parents=True,exist_ok=True)
+RUN_STAGE='STARTUP'
+
+def _write_run_status(status,run_id,stage,**extra):
+ MANIFEST.parent.mkdir(parents=True,exist_ok=True)
+ payload={'status':status,'run_id':run_id,'stage':stage,**extra}
+ (MANIFEST.parent/'run_status.json').write_text(json.dumps(payload,indent=2,sort_keys=True),encoding='utf8',newline='\n')
+
+def _run(run_id):
+ global RUN_STAGE
+ p=argparse.ArgumentParser();p.add_argument('--scale',choices=['starter','full'],default='starter');p.add_argument('--seed',type=int,default=20261022);p.add_argument('--as-of',help='explicit UTC observation horizon for active journeys (ISO 8601)');p.add_argument('--no-detect',action='store_true',help='skip the normal post-generation detector pass');p.add_argument('--sql',action='store_true',help='also create a portable SQL seed file');p.add_argument('--json',action='store_true',help='also export each generated table as JSON');a=p.parse_args();a.detect=not a.no_detect;rng=random.Random(a.seed);RUN_STAGE='RESETTING_DATABASE';initialize();GENERATED.mkdir(parents=True,exist_ok=True);MANIFEST.parent.mkdir(parents=True,exist_ok=True)
  count=12 if a.scale=='starter' else 1000; nc=6 if a.scale=='starter' else 300
  with transaction() as db:
-  for table in ('CorrectiveActionEvent','CorrectiveAction','ExcursionStatusEvent','ExcursionRevision','Notification','Excursion','LifecycleEvent','CustodyEvent','SensorReading','SensorCalibrationHistory','RouteStop','MonitoringWindow','ContainerAssignment','Sensor','Container','Shipment','ThresholdPolicy','Product'):db.execute(f'DELETE FROM {table}')
+  for table in ('CorrectiveActionEvent','CorrectiveAction','ExcursionStatusEvent','ExcursionRevision','Notification','Excursion','DetectionAnalysis','LifecycleEvent','CustodyEvent','SensorReading','SensorCalibrationHistory','RouteStop','MonitoringWindow','ContainerAssignment','Sensor','Container','Shipment','ThresholdPolicy','Product'):db.execute(f'DELETE FROM {table}')
   insert_master_data(db,nc)
   db.execute('CREATE TEMP TABLE StagingSensorReading AS SELECT * FROM SensorReading WHERE 0')
   anomaly_updates=[];gap_deletes=[];failed_sensors=[]
@@ -81,13 +89,19 @@ def main():
     if event_no==4: when=actual_end
     db.execute('INSERT INTO CustodyEvent VALUES(?,?,?,?,?,?,?,?)',(f'CST-{i:06d}-{event_no+1:03d}',sid,previous,custodian,event_type,custodian,when.isoformat(),'Synthetic custody record'));previous=custodian
    if i%7==0:
-    for k in ('TEMP','HUM'):truth.append({'case_id':f'GT-{i:06d}-{k}','scenario':'brief_excursion','shipment_id':sid,'sensor_id':f'SNS-{c}-{k}','expected':'detected','expected_kind':k,'recorded_at':(start+timedelta(minutes=150)).isoformat(),'input_json':''})
+    for k in ('TEMP','HUM'):
+     if not (container_idx==1 and k=='TEMP'):truth.append({'case_id':f'GT-{i:06d}-{k}','scenario':'brief_excursion','shipment_id':sid,'sensor_id':f'SNS-{c}-{k}','expected':'detected','expected_kind':k,'recorded_at':(start+timedelta(minutes=150)).isoformat(),'input_json':''})
    if i%19==0 or i==12:
-    for k in ('TEMP','HUM'):truth.append({'case_id':f'GT-{i:06d}-PROLONGED-{k}','scenario':'prolonged_excursion','shipment_id':sid,'sensor_id':f'SNS-{c}-{k}','expected':'detected','expected_kind':k,'recorded_at':(start+timedelta(minutes=300)).isoformat(),'input_json':''})
+    for k in ('TEMP','HUM'):
+     if not (container_idx==1 and k=='TEMP'):truth.append({'case_id':f'GT-{i:06d}-PROLONGED-{k}','scenario':'prolonged_excursion','shipment_id':sid,'sensor_id':f'SNS-{c}-{k}','expected':'detected','expected_kind':k,'recorded_at':(start+timedelta(minutes=300)).isoformat(),'input_json':''})
    if i%13==0 or (a.scale=='starter' and i==count):
     for k in ('TEMP','HUM'):truth.append({'case_id':f'GT-{i:06d}-GAP-{k}','scenario':'sensor_dropout','shipment_id':sid,'sensor_id':f'SNS-{c}-{k}','expected':'detected','expected_kind':'SENSOR_GAP','recorded_at':(start+timedelta(minutes=405)).isoformat()})
-   if i==1:truth.append({'case_id':'GT-NEG-1','scenario':'physical_range','shipment_id':sid,'sensor_id':f'SNS-{c}-TEMP','expected':'detected','expected_kind':'INVALID_PHYSICAL_RANGE','recorded_at':(start+timedelta(minutes=225)).isoformat()})
-   if container_idx==1:truth.append({'case_id':f'GT-{i:06d}-CAL','scenario':'calibration_failure','shipment_id':sid,'sensor_id':f'SNS-{c}-TEMP','expected':'detected','expected_kind':'CALIBRATION_FAILURE','recorded_at':start.isoformat()})
+   if i==1:
+    truth.append({'case_id':'GT-NEG-1','scenario':'physical_range','shipment_id':sid,'sensor_id':f'SNS-{c}-TEMP','expected':'detected','expected_kind':'INVALID_PHYSICAL_RANGE','recorded_at':(start+timedelta(minutes=225)).isoformat()})
+    truth.append({'case_id':'GT-NEG-1-GAP','scenario':'invalid_observation_gap','shipment_id':sid,'sensor_id':f'SNS-{c}-TEMP','expected':'detected','expected_kind':'SENSOR_GAP','recorded_at':(start+timedelta(minutes=225)).isoformat()})
+   if container_idx==1:
+    truth.append({'case_id':f'GT-{i:06d}-CAL','scenario':'calibration_failure','shipment_id':sid,'sensor_id':f'SNS-{c}-TEMP','expected':'detected','expected_kind':'CALIBRATION_FAILURE','recorded_at':start.isoformat()})
+    truth.append({'case_id':f'GT-{i:06d}-CAL-GAP','scenario':'untrusted_calibration_coverage','shipment_id':sid,'sensor_id':f'SNS-{c}-TEMP','expected':'detected','expected_kind':'SENSOR_GAP','recorded_at':start.isoformat()})
    if delayed and not active:truth.append({'case_id':f'GT-{i:06d}-DELAY','scenario':'route_delay','shipment_id':sid,'sensor_id':'','expected':'detected','expected_kind':'ROUTE_DELAY','recorded_at':(start+(end-start)*4/5).isoformat()})
   db.execute('CREATE UNIQUE INDEX idx_staging_reading_id ON StagingSensorReading(reading_id)')
   db.executemany('UPDATE StagingSensorReading SET value=?,quality=? WHERE reading_id=?',anomaly_updates)
@@ -128,7 +142,7 @@ def main():
    if a.json: files.append(export_json_table(db,table))
  if a.scale=='starter':
   compact=connect();compact.execute('VACUUM');compact.close()
- detected=0
+ RUN_STAGE='DETECTION';detected=0
  if a.detect:
   from services.engine import detect_excursions
   db=connect();ids=[r[0] for r in db.execute('SELECT shipment_id FROM Shipment ORDER BY shipment_id')]
@@ -137,6 +151,8 @@ def main():
    detected+=len(detect_excursions(db,sid,horizon))
   db.close()
  db=connect()
+ # DetectionAnalysis contains operational completion timestamps and is intentionally
+ # excluded from deterministic dataset artifacts/checksums.
  for table in ('MonitoringWindow','Excursion','CorrectiveAction','Notification','ExcursionRevision','ExcursionStatusEvent','CorrectiveActionEvent'):
   files.append(export_csv_table(db,table))
   if a.json: files.append(export_json_table(db,table))
@@ -154,25 +170,44 @@ def main():
  try: source_commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=BASE_DIR,text=True,stderr=subprocess.DEVNULL).strip()
  except Exception: source_commit=None
  manifest={'seed':a.seed,'scale':a.scale,'products':len(PRODUCTS),'shipments':count,'containers':nc,
-           'generator_version':'1.3','python_version':platform.python_version(),
+           'generator_version':'1.4','python_version':platform.python_version(),
            'interval_minutes':EXPECTED_INTERVAL_MINUTES,'synthetic_only':True,
            'timestamp_policy':'wall-clock generation time omitted for reproducibility','as_of':a.as_of,
            'source_commit':source_commit,'files':files,
            'ground_truth_files':truth_manifest,'sql_export':sql_export}
  MANIFEST.write_text(json.dumps(manifest,indent=2,sort_keys=True),encoding='utf8',newline='\n')
- (MANIFEST.parent/'run_status.json').write_text(json.dumps({'status':'VALIDATING','seed':a.seed,'scale':a.scale},sort_keys=True),encoding='utf8',newline='\n')
+ RUN_STAGE='VALIDATION';_write_run_status('RUNNING',run_id,RUN_STAGE,seed=a.seed,scale=a.scale)
  from services.validation import write_reports
  validation=write_reports()
  db=connect()
  counts={table:db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0] for table in ('Product','Shipment','Container','Sensor','SensorReading','Excursion','CorrectiveAction','CustodyEvent','LifecycleEvent')}
  db.close()
- summary={'scale':a.scale,'seed':a.seed,'generator_version':'1.3','counts':counts,'validation_status':validation['status'],'sql_export':sql_export}
+ summary={'scale':a.scale,'seed':a.seed,'generator_version':'1.4','counts':counts,'validation_status':validation['status'],'sql_export':sql_export}
  (GENERATED/'generation_summary.json').write_text(json.dumps(summary,indent=2,sort_keys=True),encoding='utf8',newline='\n')
  if validation['status']!='PASS':
-  (MANIFEST.parent/'run_status.json').write_text(json.dumps({'status':'FAILED_VALIDATION','seed':a.seed,'scale':a.scale,'validation_errors':validation['errors']},indent=2,sort_keys=True),encoding='utf8',newline='\n')
+  _write_run_status('FAILED',run_id,'VALIDATION',seed=a.seed,scale=a.scale,reason='validation failed',validation_errors=validation['errors'])
   print(json.dumps({**summary,'excursions_detected':detected},indent=2));raise SystemExit(2)
  manifest['status']='COMPLETE'
  MANIFEST.write_text(json.dumps(manifest,indent=2,sort_keys=True),encoding='utf8',newline='\n')
- (MANIFEST.parent/'run_status.json').write_text(json.dumps({'status':'COMPLETE','seed':a.seed,'scale':a.scale,'manifest':MANIFEST.name},indent=2,sort_keys=True),encoding='utf8',newline='\n')
+ RUN_STAGE='COMPLETE';_write_run_status('COMPLETE',run_id,RUN_STAGE,seed=a.seed,scale=a.scale,manifest=MANIFEST.name)
  print(json.dumps({**summary,'excursions_detected':detected},indent=2))
+
+def main():
+ global RUN_STAGE
+ run_id=uuid.uuid4().hex
+ try:
+  pre=argparse.ArgumentParser(add_help=False);pre.add_argument('--as-of');known,_=pre.parse_known_args()
+  if known.as_of:datetime.fromisoformat(known.as_of.replace('Z','+00:00'))
+ except (ValueError,IndexError) as exc:
+  _write_run_status('FAILED',run_id,'ARGUMENT_VALIDATION',reason=str(exc));raise SystemExit(2)
+ _write_run_status('STARTED',run_id,'STARTUP')
+ try:_run(run_id)
+ except BaseException as exc:
+  existing={}
+  try:existing=json.loads((MANIFEST.parent/'run_status.json').read_text(encoding='utf8'))
+  except Exception:pass
+  if RUN_STAGE!='COMPLETE' and not (existing.get('run_id')==run_id and existing.get('status')=='FAILED'):
+   _write_run_status('FAILED',run_id,RUN_STAGE,reason=str(exc) or type(exc).__name__)
+  raise
+
 if __name__=='__main__':main()

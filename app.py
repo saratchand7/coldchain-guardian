@@ -49,7 +49,8 @@ def reports_page(): return render_template('reports.html')
 def dashboard():
     db=connect()
     def one(sql): return db.execute(sql).fetchone()[0]
-    result={'total_shipments':one('SELECT COUNT(*) FROM Shipment'),'active_shipments':one("SELECT COUNT(*) FROM Shipment WHERE status IN ('IN_TRANSIT','DELAYED','EXCEPTION')"),'delivered_shipments':one("SELECT COUNT(*) FROM Shipment WHERE status='DELIVERED'"),'containers':one('SELECT COUNT(*) FROM Container'),'sensors':one('SELECT COUNT(*) FROM Sensor'),'active_excursions':one("SELECT COUNT(*) FROM Excursion WHERE status='OPEN'"),'critical_exceptions':one("SELECT COUNT(*) FROM Excursion WHERE severity='CRITICAL'"),'sensor_dropouts':one("SELECT COUNT(*) FROM Excursion WHERE kind='SENSOR_GAP'"),'pending_actions':one("SELECT COUNT(*) FROM CorrectiveAction WHERE status IN ('OPEN','IN_PROGRESS')"),'compliance_percentage':0}
+    current="COALESCE(json_extract(evidence_json,'$.condition_active'),1)=1"
+    result={'total_shipments':one('SELECT COUNT(*) FROM Shipment'),'active_shipments':one("SELECT COUNT(*) FROM Shipment WHERE status IN ('IN_TRANSIT','DELAYED','EXCEPTION')"),'delivered_shipments':one("SELECT COUNT(*) FROM Shipment WHERE status='DELIVERED'"),'containers':one('SELECT COUNT(*) FROM Container'),'sensors':one('SELECT COUNT(*) FROM Sensor'),'active_excursions':one("SELECT COUNT(*) FROM Excursion WHERE status='OPEN' AND "+current),'critical_exceptions':one("SELECT COUNT(*) FROM Excursion WHERE severity='CRITICAL' AND "+current),'sensor_dropouts':one("SELECT COUNT(*) FROM Excursion WHERE kind='SENSOR_GAP' AND "+current),'pending_actions':one("SELECT COUNT(*) FROM CorrectiveAction WHERE status IN ('OPEN','IN_PROGRESS')"),'compliance_percentage':0}
     outcome_metrics=calculate_metrics(validate_data=False,as_of=iso_now())
     result['compliance_percentage']=outcome_metrics['shipment_compliance_percentage']
     result['assessment_counts']=outcome_metrics['shipment_assessment_counts']

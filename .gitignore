@@ -4,6 +4,8 @@ __pycache__/
 .pytest-tmp-full/
 .pytest-tmp-final/
 .pytest-tmp-final2/
+.pytest_*/
+.verify/
 .verify-data/
 .verify-reports/
 .full-verify-one/

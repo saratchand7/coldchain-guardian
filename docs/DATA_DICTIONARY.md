@@ -24,6 +24,11 @@ All timestamps are ISO 8601 UTC text. PK is primary key; FK is foreign key. Requ
 | MonitoringWindow | shipment_id | TEXT | Yes | PK/FK Shipment; one explicit assessment horizon per shipment |
 | MonitoringWindow | observation_start, observed_through | TEXT | Yes | UTC window used for expected sensor coverage; end cannot precede start |
 | MonitoringWindow | updated_at, source | TEXT | Yes | UTC update and documented horizon source |
+| DetectionAnalysis | shipment_id | TEXT | Yes | PK/FK Shipment; current detector state for one shipment |
+| DetectionAnalysis | status | TEXT | Yes | RUNNING, SUCCESS, or FAILED; compliance requires SUCCESS |
+| DetectionAnalysis | observation_start, observation_end | TEXT | Yes | Exact source-analysis horizon; actual arrival is authoritative for delivered trips |
+| DetectionAnalysis | source_hash | TEXT | No | Hash of current shipment, assignments, sensors, calibration, readings, policies, and horizon |
+| DetectionAnalysis | completed_at, error_message | TEXT | No/Yes | Operational completion time and bounded failure reason; excluded from deterministic checksums |
 | Sensor | sensor_id | TEXT | Yes | PK; SNS-CNT-######-TEMP/HUM |
 | Sensor | container_id | TEXT | Yes | FK Container |
 | Sensor | kind | TEXT | Yes; TEMP, HUM | Unique per container and kind |
@@ -91,4 +96,4 @@ All timestamps are ISO 8601 UTC text. PK is primary key; FK is foreign key. Requ
 | Notification | created_at, message | TEXT | Yes | Required event notice |
 | Notification | acknowledged | INTEGER | Yes; 0 or 1 | CHECK constraint |
 
-ContainerAssignment is the bridge/history table for shipment and container allocation. MonitoringWindow records the explicit observation boundary for active journeys. LifecycleEvent, CustodyEvent, ExcursionStatusEvent, ExcursionRevision, and CorrectiveActionEvent are append-only historical records.
+ContainerAssignment is the bridge/history table for shipment and container allocation. MonitoringWindow records the explicit observation boundary for active journeys. DetectionAnalysis prevents missing, failed, or stale detector output from certifying compliance. LifecycleEvent, CustodyEvent, ExcursionStatusEvent, ExcursionRevision, and CorrectiveActionEvent are append-only historical records.
