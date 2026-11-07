@@ -2,7 +2,7 @@
 
 Status: **PASS**
 
-Checks passed: 27 / 27
+Checks passed: 30 / 30
 
 | Check | Result | Count |
 |---|---:|---:|
@@ -28,13 +28,16 @@ Checks passed: 27 / 27
 | container_assignment_overlap | PASS | 0 |
 | expected_sensor_coverage_spans_persisted | PASS | 0 |
 | missing_or_invalid_expected_slots_visible | PASS | 0 |
+| current_successful_detection_analysis | PASS | 0 |
+| required_temp_and_humidity_evidence | PASS | 0 |
 | custody_chain_and_delivery_reconciliation | PASS | 0 |
 | lifecycle_history_matches_current_state | PASS | 0 |
 | status_history_matches_current_state | PASS | 0 |
 | ground_truth_source_references | PASS | 0 |
+| ground_truth_expected_events_persisted | PASS | 0 |
 | export_manifest_hash_and_row_consistency | PASS | 0 |
 
-Records checked: 20556
+Records checked: 1832916
 Errors: 0
 Warnings: 0
 
@@ -44,9 +47,9 @@ Warnings: 0
 
 ## Detected anomaly categories
 
-- CALIBRATION_FAILURE: 2
-- HUM: 2
+- CALIBRATION_FAILURE: 4
+- HUM: 195
 - INVALID_PHYSICAL_RANGE: 1
-- ROUTE_DELAY: 1
-- SENSOR_GAP: 5
-- TEMP: 2
+- ROUTE_DELAY: 41
+- SENSOR_GAP: 157
+- TEMP: 194
