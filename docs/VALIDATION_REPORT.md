@@ -88,3 +88,12 @@ redundant sensors on the same container, validated sensor replacement, and a
 missing interval. Evidence should identify the affected container, sensor,
 readings, and policy. The independent recheck did not exercise the Windows
 launcher.
+
+### Concurrent-container correction
+
+Detection now tracks condition runs per monitored unit, and shipment assessment
+requires temperature and humidity coverage for each active unit. In regression
+tests, the concurrent 9 °C container produced a traceable 20-minute excursion and
+a `NON_COMPLIANT` shipment. Two safe containers produced `COMPLIANT`. Conflicting
+observations at a handoff produced `INCOMPLETE_EVIDENCE`. The existing handoff and
+missing-slot regression tests also passed.

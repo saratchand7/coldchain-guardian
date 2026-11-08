@@ -5,14 +5,7 @@ from datetime import timedelta
 from config import EXPECTED_INTERVAL_MINUTES
 from services.engine import (CalibrationResolver, PolicyResolver, REQUIRED_MODALITIES,
                              analysis_fingerprint, observation_window, parse_time,
-                             reading_trust)
-
-
-def _assigned_sensors(db, shipment_id, start, end):
-    return db.execute('SELECT s.sensor_id,s.kind,a.started_at,a.ended_at FROM ContainerAssignment a '
-                      'JOIN Sensor s USING(container_id) WHERE a.shipment_id=? AND a.started_at<=? '
-                      'AND (a.ended_at IS NULL OR a.ended_at>=?) ORDER BY s.kind,s.sensor_id',
-                      (shipment_id, end.isoformat(), start.isoformat())).fetchall()
+                             reading_trust, monitoring_assignments, policy_bounds, condition_state)
 
 
 def assess_shipment(db, shipment_id, as_of=None):
@@ -26,8 +19,15 @@ def assess_shipment(db, shipment_id, as_of=None):
     if end < start:
         issues.append('INVALID_OBSERVATION_WINDOW')
     else:
-        sensors = _assigned_sensors(db, shipment_id, start, end)
-        by_kind = {kind: [s for s in sensors if s['kind'] == kind] for kind in REQUIRED_MODALITIES}
+        assignments = monitoring_assignments(db, shipment_id, start, end)
+        sensors = {}
+        for sensor in db.execute(
+                'SELECT DISTINCT s.* FROM Sensor s JOIN ContainerAssignment a USING(container_id) '
+                'WHERE a.shipment_id=?', (shipment_id,)):
+            sensors.setdefault((sensor['container_id'], sensor['kind']), []).append(sensor['sensor_id'])
+        windows = [(row, parse_time(row['started_at']),
+                    parse_time(row['ended_at']) if row['ended_at'] else end)
+                   for row in assignments]
         readings = db.execute('SELECT r.*,s.kind FROM SensorReading r JOIN Sensor s USING(sensor_id) '
                               'WHERE r.shipment_id=? AND r.recorded_at>=? AND r.recorded_at<=? '
                               'ORDER BY r.recorded_at,r.sensor_id',
@@ -37,29 +37,38 @@ def assess_shipment(db, shipment_id, as_of=None):
         policies = PolicyResolver(db)
         cursor = start
         while cursor <= end:
-            expected_total += len(REQUIRED_MODALITIES)
+            active = {}
+            for assignment, assigned_from, assigned_until in windows:
+                if assigned_from <= cursor <= assigned_until:
+                    active.setdefault(assignment['scope'], set()).add(assignment['container_id'])
+            if not active:
+                active[None] = set()
+            expected_total += len(active) * len(REQUIRED_MODALITIES)
             try:
-                policies.at(shipment['product_id'], cursor.isoformat())
+                policy = policies.at(shipment['product_id'], cursor.isoformat())
             except ValueError:
+                policy = None
                 issues.append('AMBIGUOUS_OR_MISSING_POLICY')
-            for kind in REQUIRED_MODALITIES:
-                active = [s for s in by_kind[kind]
-                          if parse_time(s['started_at']) <= cursor and
-                          (s['ended_at'] is None or cursor <= parse_time(s['ended_at']))]
-                if not active:
-                    issues.append('MISSING_REQUIRED_MODALITY:'+kind)
-                    continue
-                covered = False
-                for sensor in active:
-                    reading = at_sensor.get((cursor.isoformat(), sensor['sensor_id']))
-                    if reading and reading_trust(db, reading, kind, start, calibrations,
-                                                 require_assignment=False)[0]:
-                        covered = True
-                        break
-                if covered:
-                    received_total += 1
-                else:
-                    issues.append('INCOMPLETE_MODALITY_COVERAGE:'+kind)
+            for containers in active.values():
+                for kind in REQUIRED_MODALITIES:
+                    sensor_ids = {sensor_id for container in containers
+                                  for sensor_id in sensors.get((container, kind), [])}
+                    if not sensor_ids:
+                        issues.append('MISSING_REQUIRED_MODALITY:'+kind)
+                        continue
+                    trusted = []
+                    for sensor_id in sensor_ids:
+                        reading = at_sensor.get((cursor.isoformat(), sensor_id))
+                        if reading and reading_trust(db, reading, kind, start, calibrations,
+                                                     require_assignment=False)[0]:
+                            trusted.append(reading)
+                    if not trusted:
+                        issues.append('INCOMPLETE_MODALITY_COVERAGE:'+kind)
+                    elif policy and len({condition_state(r['value'], *policy_bounds(policy, kind))
+                                         for r in trusted}) > 1:
+                        issues.append('CONFLICTING_MODALITY_OBSERVATIONS:'+kind)
+                    else:
+                        received_total += 1
             cursor += timedelta(minutes=EXPECTED_INTERVAL_MINUTES)
 
     if completed:

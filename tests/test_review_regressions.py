@@ -286,3 +286,39 @@ def test_failed_generator_attempt_replaces_complete_status(tmp_path):
     failed=subprocess.run([sys.executable,'generate_data.py','--as-of','not-a-timestamp'],cwd=root,env=env,capture_output=True,text=True)
     status=json.loads((data/'run_status.json').read_text())
     assert failed.returncode!=0 and status['status']=='FAILED' and status['stage']=='ARGUMENT_VALIDATION'
+
+@pytest.mark.parametrize('temperature,expected', [(9, 'NON_COMPLIANT'), (5, 'COMPLIANT')])
+def test_concurrent_containers_are_assessed_separately(tmp_path, temperature, expected):
+    path = setup_db(tmp_path/'concurrent.db', completed=True)
+    with transaction(path) as db:
+        add_complete_dual_readings(db)
+        db.execute("INSERT INTO Container VALUES('C2','box','AVAILABLE')")
+        db.execute("INSERT INTO ContainerAssignment SELECT 'AS2','C2',shipment_id,started_at,ended_at "
+                   "FROM ContainerAssignment WHERE assignment_id='AS'")
+        db.execute("INSERT INTO Sensor VALUES('X2','C2','TEMP',?,'VALID')", (T0.isoformat(),))
+        add_humidity_sensor(db, 'H2', 'C2')
+        for minute in range(0, 21, 5):
+            add_reading(db, minute, temperature, sensor='X2')
+            add_reading(db, minute, 50, sensor='H2', unit='%')
+    db = connect(path)
+    detect_excursions(db, 'S')
+    result = assess_shipment(db, 'S')
+    assert result['outcome'] == expected
+    assert result['expected_readings'] == result['trusted_readings'] == 20
+    if temperature == 9:
+        event = db.execute("SELECT * FROM Excursion WHERE kind='TEMP'").fetchone()
+        assert event['duration_minutes'] == 20
+        assert {r['container_id'] for r in json.loads(event['evidence_json'])['readings']} == {'C2'}
+    assert validate(path)['status'] == 'PASS'
+    db.close()
+
+
+def test_overlapping_handoff_observations_disagree_on_condition(tmp_path):
+    _, db = _replacement_fixture(tmp_path/'conflict.db', ((15, 5), (20, 5)))
+    add_reading(db, 15, 9)
+    db.commit()
+    detect_excursions(db, 'S')
+    result = assess_shipment(db, 'S')
+    assert result['outcome'] == 'INCOMPLETE_EVIDENCE'
+    assert 'CONFLICTING_MODALITY_OBSERVATIONS:TEMP' in result['issues']
+    db.close()

@@ -16,7 +16,17 @@ The shipment product identifies its applicable ThresholdPolicy. A policy is sele
 
 Temperature readings outside -80 to 100°C and humidity outside 0–100% are physical-range-invalid. They create INVALID_PHYSICAL_RANGE evidence and are never evaluated as a product threshold excursion. These broad limits are sensor data checks, not product limits.
 
-A product excursion starts at the first violating sample. It ends at the first valid recovery sample. Duration is the elapsed interval between those samples. The detector evaluates each shipment and modality on the shared five-minute grid. Consecutive trusted readings under the same effective policy remain one run across a validated sensor/container handoff, and evidence records all contributing sensor and reading IDs. If no recovery exists, the detector uses the last violating sample plus the expected interval and leaves ended_at empty. A missing or conflicting modality slot censors the run; unrelated shipments, policies, modalities, and runs are never merged.
+A product excursion starts at the first violating sample. It ends at the first valid recovery sample. Duration is the elapsed interval between those samples. The detector evaluates each monitored unit and modality on the shared five-minute
+grid. Concurrent container assignments are separate monitored units. Two sequential
+assignments share a unit when one ends exactly as the other begins and those are
+the only assignments at the boundary. Consecutive trusted readings under the same
+effective policy preserve duration across that handoff. Evidence identifies the
+contributing containers, sensors, readings, and policy. If no recovery exists, the
+detector uses the last violating sample plus the expected interval. Missing slots
+and conflicting condition classifications censor the run. Shipment assessment
+requires coverage for each active unit and reports conflicting observations as
+incomplete evidence. Run detection again on existing databases to refresh their
+analysis for this monitoring rule.
 
 A missing interval is detected against the expected five-minute schedule from shipment departure through actual arrival, even when delivery is later than planned. Active overdue journeys continue through their explicit or recorded observation horizon. TEMP and HUM are both required; replacement sensors may jointly satisfy coverage when their assignment intervals cover every expected slot. Leading, trailing, internal, off-grid, invalid, and zero-row sensor timelines are represented. Missing values are never treated as safe. A gap censors an open product excursion at the previous valid sample plus one expected interval; the unobserved interval is unknown. One shared trust rule checks schedule alignment, assignment, unit, physical range, quality, and effective calibration. A failed, future-dated, or older-than-365-day calibration makes a reading untrusted and creates a CRITICAL CALIBRATION_FAILURE. Failed sensor readings remain in the database for traceability but do not support product threshold conclusions. A route stop marked delayed or with actual_at after planned_at creates a route-delay exception.
 

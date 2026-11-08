@@ -114,10 +114,48 @@ def reading_trust(db, reading, kind, window_start, calibration_resolver=None,
     return True, 'VALID'
 
 
+def monitoring_assignments(db, shipment_id, start, end):
+    """Group assignments into monitored units using unambiguous timed handoffs."""
+    assignments = [dict(row) for row in db.execute(
+        'SELECT * FROM ContainerAssignment WHERE shipment_id=? AND started_at<=? '
+        'AND (ended_at IS NULL OR ended_at>=?) ORDER BY started_at,assignment_id',
+        (shipment_id, end.isoformat(), start.isoformat()))]
+    for assignment in assignments:
+        assignment['scope'] = assignment['assignment_id']
+    for outgoing, incoming in zip(assignments, assignments[1:]):
+        boundary = incoming['started_at']
+        if outgoing['ended_at'] != boundary:
+            continue
+        at_boundary = [row for row in assignments if row['started_at'] <= boundary
+                       and (row['ended_at'] is None or row['ended_at'] >= boundary)]
+        if len(at_boundary) == 2 and outgoing['started_at'] < boundary:
+            incoming['scope'] = outgoing['scope']
+    return assignments
+
+
+def monitoring_scope_ends(assignments, journey_end):
+    ends = {}
+    for row in assignments:
+        scope = row['scope']
+        assigned_until = parse_time(row['ended_at']) if row['ended_at'] else journey_end
+        ends[scope] = max(ends.get(scope, assigned_until), assigned_until)
+    return {scope: min(end, journey_end) for scope, end in ends.items()}
+
+
+def policy_bounds(policy, kind):
+    if kind == 'TEMP':
+        return policy['temp_min'], policy['temp_max']
+    return policy['humidity_min'], policy['humidity_max']
+
+
+def condition_state(value, low, high):
+    return -1 if value < low else 1 if value > high else 0
+
+
 def analysis_fingerprint(db, shipment_id, observation_end):
     """Hash every input that can change the detector's decision for a shipment."""
     digest = hashlib.sha256()
-    digest.update(str(observation_end).encode())
+    digest.update(f'container-scope-v1:{observation_end}'.encode())
     queries = [
         ('SELECT * FROM Shipment WHERE shipment_id=? ORDER BY shipment_id', (shipment_id,)),
         ('SELECT * FROM ContainerAssignment WHERE shipment_id=? ORDER BY assignment_id', (shipment_id,)),
@@ -319,13 +357,23 @@ def _duration_from_evidence(db, row, evidence):
     if not ids or any(not rid for rid in ids) or len(ids) != len(set(ids)):
         raise ValueError('Excursion evidence has missing or duplicate reading IDs')
     marks = ','.join('?' for _ in ids)
-    linked = db.execute(f'SELECT r.*,s.kind FROM SensorReading r JOIN Sensor s USING(sensor_id) '
+    linked = db.execute(f'SELECT r.*,s.kind,s.container_id FROM SensorReading r JOIN Sensor s USING(sensor_id) '
                         f'WHERE r.reading_id IN ({marks})', ids).fetchall()
     by_id = {r['reading_id']: r for r in linked}
     if len(by_id) != len(ids):
         raise ValueError('Excursion source reading is missing')
     readings = [by_id[rid] for rid in ids]
     allowed_sensors=set(evidence.get('sensor_ids') or ([row['sensor_id']] if row['sensor_id'] else []))
+    assignments = monitoring_assignments(db, row['shipment_id'], journey_start, journey_end)
+    source_scopes = None
+
+    def scopes_for(reading):
+        at = reading['recorded_at']
+        return {assignment['scope'] for assignment in assignments
+                if assignment['container_id'] == reading['container_id']
+                and assignment['started_at'] <= at
+                and (assignment['ended_at'] is None or assignment['ended_at'] >= at)}
+
     for source_item,r in zip(sources,readings):
         source_at=parse_time(r['recorded_at'])
         if source_at<journey_start or source_at>journey_end:
@@ -341,12 +389,12 @@ def _duration_from_evidence(db, row, evidence):
             raise ValueError('Serialized evidence value differs from its authoritative source')
         if not _sensor_calibration_valid(db, r['sensor_id'], r['recorded_at']):
             raise ValueError('Excursion evidence calibration is invalid at reading time')
-        assignment = db.execute('SELECT 1 FROM ContainerAssignment a JOIN Sensor s USING(container_id) '
-                                'WHERE a.shipment_id=? AND s.sensor_id=? AND a.started_at<=? '
-                                'AND (a.ended_at IS NULL OR a.ended_at>=?)',
-                                (row['shipment_id'], r['sensor_id'], r['recorded_at'], r['recorded_at'])).fetchone()
-        if not assignment:
-            raise ValueError('Excursion source reading is outside its assignment')
+        if source_item.get('container_id', r['container_id']) != r['container_id']:
+            raise ValueError('Serialized evidence container differs from its authoritative source')
+        scopes = scopes_for(r)
+        source_scopes = scopes if source_scopes is None else source_scopes & scopes
+        if not source_scopes:
+            raise ValueError('Excursion source readings do not share a monitored unit')
         policy = applicable_policy(db, db.execute('SELECT product_id FROM Shipment WHERE shipment_id=?',
                                                   (row['shipment_id'],)).fetchone()['product_id'],
                                    r['recorded_at'])
@@ -366,7 +414,7 @@ def _duration_from_evidence(db, row, evidence):
             raise ValueError('Excursion source crosses an unobserved gap')
     recovery_id = evidence.get('recovery_reading_id')
     if recovery_id:
-        recovery = db.execute('SELECT r.*,s.kind FROM SensorReading r JOIN Sensor s USING(sensor_id) '
+        recovery = db.execute('SELECT r.*,s.kind,s.container_id FROM SensorReading r JOIN Sensor s USING(sensor_id) '
                               'WHERE reading_id=?', (recovery_id,)).fetchone()
         if not recovery or recovery['shipment_id'] != row['shipment_id'] or \
            recovery['sensor_id'] not in allowed_sensors or recovery['kind'] != row['kind']:
@@ -377,10 +425,10 @@ def _duration_from_evidence(db, row, evidence):
             raise ValueError('Recovery reading is not trusted')
         if not _sensor_calibration_valid(db,recovery['sensor_id'],recovery['recorded_at']):
             raise ValueError('Recovery calibration is invalid at reading time')
-        recovery_assignment=db.execute('SELECT 1 FROM ContainerAssignment a JOIN Sensor s USING(container_id) '
-              'WHERE a.shipment_id=? AND s.sensor_id=? AND a.started_at<=? AND (a.ended_at IS NULL OR a.ended_at>=?)',
-              (row['shipment_id'],recovery['sensor_id'],recovery['recorded_at'],recovery['recorded_at'])).fetchone()
-        if not recovery_assignment:raise ValueError('Recovery reading is outside its sensor assignment')
+        if evidence.get('recovery_container_id', recovery['container_id']) != recovery['container_id']:
+            raise ValueError('Serialized recovery container differs from its authoritative source')
+        if not source_scopes & scopes_for(recovery):
+            raise ValueError('Recovery reading does not belong to the excursion monitored unit')
         recovery_at = parse_time(recovery['recorded_at'])
         if recovery_at <= instants[-1] or recovery_at-instants[-1] > timedelta(minutes=INTERVAL_MINUTES):
             raise ValueError('Recovery does not immediately follow the excursion evidence')
@@ -393,8 +441,8 @@ def _duration_from_evidence(db, row, evidence):
         calculated = (recovery_at - instants[0]).total_seconds()/60
     else:
         end=instants[-1]+timedelta(minutes=INTERVAL_MINUTES)
-        if evidence.get('assessment_as_of'):
-            end=min(end,parse_time(evidence['assessment_as_of']))
+        scope_ends = monitoring_scope_ends(assignments, journey_end)
+        end = min(end, max(scope_ends[scope] for scope in source_scopes))
         calculated = max(0,(end-instants[0]).total_seconds()/60)
     return calculated, readings
 
@@ -469,16 +517,17 @@ def _reconcile_disappeared_conditions(db, shipment_id, current_keys, window_star
                     json.dumps(evidence, sort_keys=True)))
 
 
-def _condition_groups(condition_slots, start, end):
+def _condition_groups(condition_slots, start, end, end_reason):
     """Build modality-level runs; a trusted sensor handoff cannot reset duration."""
     groups=[];step=timedelta(minutes=INTERVAL_MINUTES)
     for kind in REQUIRED_MODALITIES:
         active=None;cursor=start
         while cursor<=end:
-            candidates=condition_slots[kind].get(cursor.isoformat(),[])
+            candidates=condition_slots[kind].get(cursor.isoformat(),{}).values()
             policies={item['policy_id'] for item in candidates}
-            known=bool(candidates) and len(policies)==1
-            violations=[item for item in candidates if item['violation']]
+            states={item['state'] for item in candidates}
+            known=bool(candidates) and len(policies)==1 and len(states)==1
+            violations=[item for item in candidates if item['state']]
             all_violating=known and len(violations)==len(candidates)
             all_safe=known and not violations
             policy_id=next(iter(policies)) if known else None
@@ -497,17 +546,20 @@ def _condition_groups(condition_slots, start, end):
                 for item in sorted(violations,key=lambda x:(x['sensor_id'],x['reading_id'])):
                     active['sensor_ids'].add(item['sensor_id'])
                     active['readings'].append({'reading_id':item['reading_id'],'sensor_id':item['sensor_id'],
-                                               'value':item['value'],'at':cursor.isoformat()})
+                                               'value':item['value'],'at':cursor.isoformat(),
+                                               'container_id':item['container_id']})
             elif active and all_safe:
                 recovery=sorted(candidates,key=lambda x:(x['sensor_id'],x['reading_id']))[0]
                 active['sensor_ids'].add(recovery['sensor_id'])
+                active['recovery_container_id'] = recovery['container_id']
                 groups.append(_finish_segment(active,cursor.isoformat(),recovery['reading_id'],end))
                 active=None
             elif active:
                 groups.append(_finish_segment(active,None,None,cursor,'GAP_OR_INVALID_OBSERVATION'))
                 active=None
             cursor+=step
-        if active:groups.append(_finish_segment(active,None,None,end))
+        if active:
+            groups.append(_finish_segment(active, None, None, end, end_reason))
     return groups
 
 
@@ -516,16 +568,20 @@ def _detect_excursions_impl(db, shipment_id, as_of=None):
     if not shipment:
         raise ValueError('Shipment not found')
     start, end = observation_window(db, shipment, as_of)
-    sensors = db.execute('SELECT DISTINCT x.sensor_id,x.kind,x.calibration_status,x.calibrated_at,a.started_at,a.ended_at '
+    sensors = db.execute('SELECT a.assignment_id,a.container_id,x.sensor_id,x.kind,x.calibration_status,x.calibrated_at,a.started_at,a.ended_at '
                          'FROM ContainerAssignment a JOIN Sensor x USING(container_id) '
                          'WHERE a.shipment_id=? AND a.started_at<=? AND (a.ended_at IS NULL OR a.ended_at>=?)',
                          (shipment_id, end.isoformat(), start.isoformat())).fetchall()
-    groups = [];condition_slots={kind:{} for kind in REQUIRED_MODALITIES}
+    assignments = monitoring_assignments(db, shipment_id, start, end)
+    scope_by_assignment = {row['assignment_id']: row['scope'] for row in assignments}
+    groups = []
+    condition_slots = {scope: {kind: {} for kind in REQUIRED_MODALITIES}
+                       for scope in scope_by_assignment.values()}
     calibration_resolver=CalibrationResolver(db);policy_resolver=PolicyResolver(db)
     for sensor_row in sensors:
         sensor = sensor_row['sensor_id']
         kind = sensor_row['kind']
-        unit = 'C' if kind == 'TEMP' else '%'
+        scope = scope_by_assignment[sensor_row['assignment_id']]
         sensor_start = max(start, parse_time(sensor_row['started_at']))
         sensor_end = min(end, parse_time(sensor_row['ended_at'])) if sensor_row['ended_at'] else end
         if sensor_end < sensor_start:
@@ -555,17 +611,21 @@ def _detect_excursions_impl(db, shipment_id, as_of=None):
                 policy = applicable_policy(db, shipment['product_id'], reading['recorded_at'],policy_resolver)
             except ValueError as exc:
                 raise ValueError(str(exc))
-            low, high = ((policy['temp_min'], policy['temp_max']) if kind == 'TEMP'
-                         else (policy['humidity_min'], policy['humidity_max']))
-            violation = reading['value'] < low or reading['value'] > high
-            condition_slots[kind].setdefault(at.isoformat(),[]).append({
-                'sensor_id':sensor,'reading_id':reading['reading_id'],'value':reading['value'],
-                'policy_id':policy['policy_id'],'limit':policy['max_excursion_minutes'],
-                'low':low,'high':high,'violation':violation})
+            low, high = policy_bounds(policy, kind)
+            candidates = condition_slots[scope][kind].setdefault(at.isoformat(), {})
+            candidates[reading['reading_id']] = {
+                'sensor_id': sensor, 'reading_id': reading['reading_id'], 'value': reading['value'],
+                'container_id': sensor_row['container_id'], 'policy_id': policy['policy_id'],
+                'limit': policy['max_excursion_minutes'], 'low': low, 'high': high,
+                'state': condition_state(reading['value'], low, high)}
         for gap in detect_gaps(db, shipment_id, sensor, window_start=sensor_start.isoformat(), window_end=sensor_end.isoformat()):
             groups.append({'sensor_id': sensor, 'kind': 'SENSOR_GAP', 'start': gap['start'], 'end': gap['end'],
                            'duration': gap['duration_minutes'], 'severity': 'HIGH', 'evidence': gap})
-    groups.extend(_condition_groups(condition_slots,start,end))
+    scope_ends = monitoring_scope_ends(assignments, end)
+    for scope, slots in condition_slots.items():
+        scope_end = scope_ends[scope]
+        end_reason = 'MONITORING_SCOPE_ENDED' if scope_end < end else None
+        groups.extend(_condition_groups(slots, start, scope_end, end_reason))
     for stop in db.execute("SELECT * FROM RouteStop WHERE shipment_id=? AND (status='DELAYED' OR (actual_at IS NOT NULL AND actual_at>planned_at))",
                            (shipment_id,)):
         delay = max(0, (parse_time(stop['actual_at'])-parse_time(stop['planned_at'])).total_seconds()/60) if stop['actual_at'] else 0
@@ -590,6 +650,7 @@ def _detect_excursions_impl(db, shipment_id, as_of=None):
                             'readings': group.get('readings', []),
                             'sensor_ids': group.get('sensor_ids') or [group.get('sensor_id')],
                             'recovery_reading_id': group.get('recovery_reading_id'),
+                            'recovery_container_id': group.get('recovery_container_id'),
                             'recovery_at': group.get('recovery'), 'assessment_as_of': end.isoformat(),
                             'censored_at':group.get('end') if not group.get('recovery') else None,
                             'censor_reason':group.get('censor_reason'),
@@ -649,6 +710,7 @@ def _finish_segment(active, recovery_at, recovery_id, window_end, censor_reason=
     if isinstance(ending,datetime):ending=ending.isoformat()
     return {'sensor_id': active['sensor_id'], 'kind': active['kind'], 'start': active['start'],
             'sensor_ids':sorted(active.get('sensor_ids') or {active['sensor_id']}),
+            'recovery_container_id': active.get('recovery_container_id'),
             'last': active['last'], 'recovery': recovery_at, 'recovery_reading_id': recovery_id,
             'duration': duration, 'limit': active['limit'], 'policy_id': active['policy_id'],
             'low': active['low'], 'high': active['high'], 'readings': active['readings'],
