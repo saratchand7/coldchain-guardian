@@ -325,25 +325,26 @@ def _duration_from_evidence(db, row, evidence):
     if len(by_id) != len(ids):
         raise ValueError('Excursion source reading is missing')
     readings = [by_id[rid] for rid in ids]
+    allowed_sensors=set(evidence.get('sensor_ids') or ([row['sensor_id']] if row['sensor_id'] else []))
     for source_item,r in zip(sources,readings):
         source_at=parse_time(r['recorded_at'])
         if source_at<journey_start or source_at>journey_end:
             raise ValueError('Excursion source reading is outside the shipment window')
-        if r['shipment_id'] != row['shipment_id'] or r['sensor_id'] != row['sensor_id']:
-            raise ValueError('Excursion evidence reading belongs to another shipment or sensor')
+        if r['shipment_id'] != row['shipment_id'] or r['sensor_id'] not in allowed_sensors or r['kind'] != row['kind']:
+            raise ValueError('Excursion evidence reading belongs to another shipment, sensor, or modality')
         physical = PHYSICAL_RANGES[r['kind']][0] <= float(r['value']) <= PHYSICAL_RANGES[r['kind']][1]
-        if r['quality'] != 'VALID' or not _is_expected_unit(db, row['sensor_id'], r) or not physical:
+        if r['quality'] != 'VALID' or not _is_expected_unit(db, r['sensor_id'], r) or not physical:
             raise ValueError('Excursion evidence contains an untrusted reading')
         if source_item.get('at') and parse_time(source_item['at'])!=parse_time(r['recorded_at']):
             raise ValueError('Serialized evidence timestamp differs from its authoritative source')
         if source_item.get('value') is not None and abs(float(source_item['value'])-float(r['value']))>1e-9:
             raise ValueError('Serialized evidence value differs from its authoritative source')
-        if not _sensor_calibration_valid(db, row['sensor_id'], r['recorded_at']):
+        if not _sensor_calibration_valid(db, r['sensor_id'], r['recorded_at']):
             raise ValueError('Excursion evidence calibration is invalid at reading time')
         assignment = db.execute('SELECT 1 FROM ContainerAssignment a JOIN Sensor s USING(container_id) '
                                 'WHERE a.shipment_id=? AND s.sensor_id=? AND a.started_at<=? '
                                 'AND (a.ended_at IS NULL OR a.ended_at>=?)',
-                                (row['shipment_id'], row['sensor_id'], r['recorded_at'], r['recorded_at'])).fetchone()
+                                (row['shipment_id'], r['sensor_id'], r['recorded_at'], r['recorded_at'])).fetchone()
         if not assignment:
             raise ValueError('Excursion source reading is outside its assignment')
         policy = applicable_policy(db, db.execute('SELECT product_id FROM Shipment WHERE shipment_id=?',
@@ -365,19 +366,20 @@ def _duration_from_evidence(db, row, evidence):
             raise ValueError('Excursion source crosses an unobserved gap')
     recovery_id = evidence.get('recovery_reading_id')
     if recovery_id:
-        recovery = db.execute('SELECT * FROM SensorReading WHERE reading_id=?', (recovery_id,)).fetchone()
-        if not recovery or recovery['shipment_id'] != row['shipment_id'] or recovery['sensor_id'] != row['sensor_id']:
-            raise ValueError('Recovery reading belongs to another shipment or sensor')
-        recovery_kind = db.execute('SELECT kind FROM Sensor WHERE sensor_id=?',
-                                   (row['sensor_id'],)).fetchone()['kind']
+        recovery = db.execute('SELECT r.*,s.kind FROM SensorReading r JOIN Sensor s USING(sensor_id) '
+                              'WHERE reading_id=?', (recovery_id,)).fetchone()
+        if not recovery or recovery['shipment_id'] != row['shipment_id'] or \
+           recovery['sensor_id'] not in allowed_sensors or recovery['kind'] != row['kind']:
+            raise ValueError('Recovery reading belongs to another shipment, sensor, or modality')
+        recovery_kind = recovery['kind']
         recovery_physical = PHYSICAL_RANGES[recovery_kind][0] <= float(recovery['value']) <= PHYSICAL_RANGES[recovery_kind][1]
-        if recovery['quality'] != 'VALID' or not _is_expected_unit(db, row['sensor_id'], recovery) or not recovery_physical:
+        if recovery['quality'] != 'VALID' or not _is_expected_unit(db, recovery['sensor_id'], recovery) or not recovery_physical:
             raise ValueError('Recovery reading is not trusted')
-        if not _sensor_calibration_valid(db,row['sensor_id'],recovery['recorded_at']):
+        if not _sensor_calibration_valid(db,recovery['sensor_id'],recovery['recorded_at']):
             raise ValueError('Recovery calibration is invalid at reading time')
         recovery_assignment=db.execute('SELECT 1 FROM ContainerAssignment a JOIN Sensor s USING(container_id) '
               'WHERE a.shipment_id=? AND s.sensor_id=? AND a.started_at<=? AND (a.ended_at IS NULL OR a.ended_at>=?)',
-              (row['shipment_id'],row['sensor_id'],recovery['recorded_at'],recovery['recorded_at'])).fetchone()
+              (row['shipment_id'],recovery['sensor_id'],recovery['recorded_at'],recovery['recorded_at'])).fetchone()
         if not recovery_assignment:raise ValueError('Recovery reading is outside its sensor assignment')
         recovery_at = parse_time(recovery['recorded_at'])
         if recovery_at <= instants[-1] or recovery_at-instants[-1] > timedelta(minutes=INTERVAL_MINUTES):
@@ -404,8 +406,9 @@ def check_excursion_duration(db, excursion_id):
         raise ValueError('Excursion not found')
     evidence = json.loads(row['evidence_json'] or '{}')
     calculated, readings = _duration_from_evidence(db, row, evidence)
-    latest = db.execute('SELECT MAX(recorded_at) FROM SensorReading WHERE shipment_id=? AND sensor_id=? '
-                        'AND quality=\'VALID\'', (row['shipment_id'], row['sensor_id'])).fetchone()[0]
+    latest = db.execute('SELECT MAX(r.recorded_at) FROM SensorReading r JOIN Sensor s USING(sensor_id) '
+                        'WHERE r.shipment_id=? AND s.kind=? AND r.quality=\'VALID\'',
+                        (row['shipment_id'], row['kind'])).fetchone()[0]
     evidence_end = evidence.get('recovery_at') or readings[-1]['recorded_at']
     stale = row['ended_at'] is None and not evidence.get('recovery_reading_id') and latest is not None and parse_time(latest) > parse_time(evidence_end)
     undercount = verify_duration_report(calculated, row['duration_minutes'])
@@ -453,6 +456,7 @@ def _reconcile_disappeared_conditions(db, shipment_id, current_keys, window_star
         evidence['condition_resolution_reason'] = 'LATE_OR_CURRENT_EVIDENCE_REMOVED_CONDITION'
         evidence['condition_resolved_at'] = window_end
         evidence['operational_review_status'] = row['status']
+        evidence['historical_source_contract'] = 'EXCURSION_REVISION_SNAPSHOT'
         digest = _source_hash({'excursion_id': row['excursion_id'], 'resolution': evidence})
         revision = db.execute('SELECT COALESCE(MAX(revision_no),0)+1 FROM ExcursionRevision '
                               'WHERE excursion_id=?', (row['excursion_id'],)).fetchone()[0]
@@ -465,6 +469,48 @@ def _reconcile_disappeared_conditions(db, shipment_id, current_keys, window_star
                     json.dumps(evidence, sort_keys=True)))
 
 
+def _condition_groups(condition_slots, start, end):
+    """Build modality-level runs; a trusted sensor handoff cannot reset duration."""
+    groups=[];step=timedelta(minutes=INTERVAL_MINUTES)
+    for kind in REQUIRED_MODALITIES:
+        active=None;cursor=start
+        while cursor<=end:
+            candidates=condition_slots[kind].get(cursor.isoformat(),[])
+            policies={item['policy_id'] for item in candidates}
+            known=bool(candidates) and len(policies)==1
+            violations=[item for item in candidates if item['violation']]
+            all_violating=known and len(violations)==len(candidates)
+            all_safe=known and not violations
+            policy_id=next(iter(policies)) if known else None
+            if active and (not known or policy_id!=active['policy_id']):
+                groups.append(_finish_segment(active,None,None,cursor,
+                              'POLICY_CHANGE' if known else 'GAP_OR_INVALID_OBSERVATION'))
+                active=None
+            if all_violating:
+                first=sorted(violations,key=lambda x:(x['sensor_id'],x['reading_id']))[0]
+                if active is None:
+                    active={'sensor_id':first['sensor_id'],'sensor_ids':set(),'kind':kind,
+                            'start':cursor.isoformat(),'last':cursor.isoformat(),
+                            'limit':first['limit'],'policy_id':policy_id,
+                            'low':first['low'],'high':first['high'],'readings':[]}
+                active['last']=cursor.isoformat()
+                for item in sorted(violations,key=lambda x:(x['sensor_id'],x['reading_id'])):
+                    active['sensor_ids'].add(item['sensor_id'])
+                    active['readings'].append({'reading_id':item['reading_id'],'sensor_id':item['sensor_id'],
+                                               'value':item['value'],'at':cursor.isoformat()})
+            elif active and all_safe:
+                recovery=sorted(candidates,key=lambda x:(x['sensor_id'],x['reading_id']))[0]
+                active['sensor_ids'].add(recovery['sensor_id'])
+                groups.append(_finish_segment(active,cursor.isoformat(),recovery['reading_id'],end))
+                active=None
+            elif active:
+                groups.append(_finish_segment(active,None,None,cursor,'GAP_OR_INVALID_OBSERVATION'))
+                active=None
+            cursor+=step
+        if active:groups.append(_finish_segment(active,None,None,end))
+    return groups
+
+
 def _detect_excursions_impl(db, shipment_id, as_of=None):
     shipment = db.execute('SELECT * FROM Shipment WHERE shipment_id=?', (shipment_id,)).fetchone()
     if not shipment:
@@ -474,7 +520,8 @@ def _detect_excursions_impl(db, shipment_id, as_of=None):
                          'FROM ContainerAssignment a JOIN Sensor x USING(container_id) '
                          'WHERE a.shipment_id=? AND a.started_at<=? AND (a.ended_at IS NULL OR a.ended_at>=?)',
                          (shipment_id, end.isoformat(), start.isoformat())).fetchall()
-    groups = [];calibration_resolver=CalibrationResolver(db);policy_resolver=PolicyResolver(db)
+    groups = [];condition_slots={kind:{} for kind in REQUIRED_MODALITIES}
+    calibration_resolver=CalibrationResolver(db);policy_resolver=PolicyResolver(db)
     for sensor_row in sensors:
         sensor = sensor_row['sensor_id']
         kind = sensor_row['kind']
@@ -492,16 +539,10 @@ def _detect_excursions_impl(db, shipment_id, as_of=None):
                            'end': None, 'duration': 0, 'severity': 'CRITICAL',
                            'evidence': {'calibrated_at': sensor_row['calibrated_at'],
                                         'calibration_status': sensor_row['calibration_status']}})
-        active = None
-        previous_at = None
         for reading in rows:
             at = parse_time(reading['recorded_at'])
-            trusted, trust_reason = reading_trust(db, reading, kind, sensor_start,
+            trusted, trust_reason = reading_trust(db, reading, kind, start,
                                                   calibration_resolver, require_assignment=False)
-            # A missing/invalid interval censors the current run before this reading is handled.
-            if active and (not trusted or at-previous_at > timedelta(minutes=INTERVAL_MINUTES)):
-                groups.append(_finish_segment(active, None, None, sensor_end, 'GAP_OR_INVALID_OBSERVATION'))
-                active = None
             if not trusted:
                 if trust_reason == 'INVALID_PHYSICAL_RANGE':
                     groups.append({'sensor_id': sensor, 'kind': 'INVALID_PHYSICAL_RANGE',
@@ -509,7 +550,6 @@ def _detect_excursions_impl(db, shipment_id, as_of=None):
                                    'duration': 0, 'severity': 'CRITICAL',
                                    'evidence': {'reading_id': reading['reading_id'], 'value': reading['value'],
                                                 'unit': reading['unit'], 'quality': reading['quality']}})
-                previous_at = at
                 continue
             try:
                 policy = applicable_policy(db, shipment['product_id'], reading['recorded_at'],policy_resolver)
@@ -518,25 +558,14 @@ def _detect_excursions_impl(db, shipment_id, as_of=None):
             low, high = ((policy['temp_min'], policy['temp_max']) if kind == 'TEMP'
                          else (policy['humidity_min'], policy['humidity_max']))
             violation = reading['value'] < low or reading['value'] > high
-            if violation:
-                if active is None or active['policy_id'] != policy['policy_id']:
-                    if active:
-                        groups.append(_finish_segment(active, None, None, sensor_end, 'POLICY_CHANGE'))
-                    active = {'sensor_id': sensor, 'kind': kind, 'start': reading['recorded_at'],
-                              'last': reading['recorded_at'], 'limit': policy['max_excursion_minutes'],
-                              'policy_id': policy['policy_id'], 'low': low, 'high': high, 'readings': []}
-                active['last'] = reading['recorded_at']
-                active['readings'].append({'reading_id': reading['reading_id'], 'value': reading['value'],
-                                           'at': reading['recorded_at']})
-            elif active:
-                groups.append(_finish_segment(active, reading['recorded_at'], reading['reading_id'], sensor_end))
-                active = None
-            previous_at = at
-        if active:
-            groups.append(_finish_segment(active, None, None, sensor_end))
+            condition_slots[kind].setdefault(at.isoformat(),[]).append({
+                'sensor_id':sensor,'reading_id':reading['reading_id'],'value':reading['value'],
+                'policy_id':policy['policy_id'],'limit':policy['max_excursion_minutes'],
+                'low':low,'high':high,'violation':violation})
         for gap in detect_gaps(db, shipment_id, sensor, window_start=sensor_start.isoformat(), window_end=sensor_end.isoformat()):
             groups.append({'sensor_id': sensor, 'kind': 'SENSOR_GAP', 'start': gap['start'], 'end': gap['end'],
                            'duration': gap['duration_minutes'], 'severity': 'HIGH', 'evidence': gap})
+    groups.extend(_condition_groups(condition_slots,start,end))
     for stop in db.execute("SELECT * FROM RouteStop WHERE shipment_id=? AND (status='DELAYED' OR (actual_at IS NOT NULL AND actual_at>planned_at))",
                            (shipment_id,)):
         delay = max(0, (parse_time(stop['actual_at'])-parse_time(stop['planned_at'])).total_seconds()/60) if stop['actual_at'] else 0
@@ -559,6 +588,7 @@ def _detect_excursions_impl(db, shipment_id, as_of=None):
                     if group.get('recovery') else group['duration']
                 evidence = {'basis': 'sampled source readings; unknown gap time is censored',
                             'readings': group.get('readings', []),
+                            'sensor_ids': group.get('sensor_ids') or [group.get('sensor_id')],
                             'recovery_reading_id': group.get('recovery_reading_id'),
                             'recovery_at': group.get('recovery'), 'assessment_as_of': end.isoformat(),
                             'censored_at':group.get('end') if not group.get('recovery') else None,
@@ -618,6 +648,7 @@ def _finish_segment(active, recovery_at, recovery_id, window_end, censor_reason=
         duration = max(0, (ending-first).total_seconds()/60)
     if isinstance(ending,datetime):ending=ending.isoformat()
     return {'sensor_id': active['sensor_id'], 'kind': active['kind'], 'start': active['start'],
+            'sensor_ids':sorted(active.get('sensor_ids') or {active['sensor_id']}),
             'last': active['last'], 'recovery': recovery_at, 'recovery_reading_id': recovery_id,
             'duration': duration, 'limit': active['limit'], 'policy_id': active['policy_id'],
             'low': active['low'], 'high': active['high'], 'readings': active['readings'],

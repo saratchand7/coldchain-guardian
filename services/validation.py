@@ -6,7 +6,7 @@ from config import BASE_DIR, GENERATED, DATABASE, MANIFEST, REPORTS_DIR
 from database import connect
 from services.engine import (detect_gaps, _duration_from_evidence, parse_time,
                               CalibrationResolver, PolicyResolver, INTERVAL_MINUTES,
-                              analysis_fingerprint, observation_window)
+                              analysis_fingerprint, observation_window, _source_hash)
 
 
 def _check(checks, name, count, detail=None, severity='error'):
@@ -81,14 +81,33 @@ def validate(path=None,include_artifacts=False):
     for e in db.execute("SELECT * FROM Excursion WHERE kind IN ('TEMP','HUM')"):
         try:
             evidence=json.loads(e['evidence_json'] or '{}')
-            calculated,reads=_duration_from_evidence(db,e,evidence)
-            if abs(float(e['duration_minutes'])-calculated)>0.01:evidence_errors+=1
-            if e['ended_at'] is None and not evidence.get('recovery_reading_id'):
-                latest=db.execute("SELECT MAX(recorded_at) FROM SensorReading WHERE shipment_id=? AND sensor_id=? AND quality='VALID'",(e['shipment_id'],e['sensor_id'])).fetchone()[0]
-                if latest and parse_time(latest)>parse_time(reads[-1]['recorded_at']):stale_events+=1
+            if evidence.get('condition_active',True):
+                calculated,reads=_duration_from_evidence(db,e,evidence)
+                if abs(float(e['duration_minutes'])-calculated)>0.01:evidence_errors+=1
+                if e['ended_at'] is None and not evidence.get('recovery_reading_id'):
+                    latest=db.execute("SELECT MAX(r.recorded_at) FROM SensorReading r JOIN Sensor s USING(sensor_id) WHERE r.shipment_id=? AND s.kind=? AND r.quality='VALID'",(e['shipment_id'],e['kind'])).fetchone()[0]
+                    if latest and parse_time(latest)>parse_time(reads[-1]['recorded_at']):stale_events+=1
         except (ValueError,KeyError,TypeError):evidence_errors+=1
     _check(checks,'excursion_duration_recalculation_from_sources',evidence_errors)
     _check(checks,'open_excursion_is_current',stale_events)
+    # Archived revisions are immutable serialized source snapshots. They remain
+    # verifiable even when a supported correction changes the current source row.
+    revision_errors=0
+    for revision in db.execute('SELECT r.*,e.shipment_id,e.sensor_id,e.kind FROM ExcursionRevision r '
+                               'JOIN Excursion e USING(excursion_id)'):
+        try:
+            evidence=json.loads(revision['evidence_json'] or '{}')
+            canonical={'shipment_id':revision['shipment_id'],'sensor_id':revision['sensor_id'],
+                       'kind':revision['kind'],'started_at':revision['started_at'],
+                       'ended_at':revision['ended_at'],
+                       'duration_minutes':round(float(revision['duration_minutes']),4),
+                       'severity':revision['severity'],'policy_id':revision['policy_id'],
+                       'evidence':evidence}
+            content_hash=_source_hash(canonical)
+            resolution_hash=_source_hash({'excursion_id':revision['excursion_id'],'resolution':evidence})
+            if revision['source_hash'] not in {content_hash,resolution_hash}:revision_errors+=1
+        except (ValueError,KeyError,TypeError,json.JSONDecodeError):revision_errors+=1
+    _check(checks,'excursion_revision_snapshot_hash_integrity',revision_errors)
     unknown_status=db.execute("SELECT COUNT(*) FROM Shipment WHERE status NOT IN ('CREATED','READY','IN_TRANSIT','DELAYED','EXCEPTION','DELIVERED','CLOSED')").fetchone()[0]
     _check(checks,'shipment_lifecycle_enum',unknown_status)
     overlap_assignment=db.execute("""SELECT COUNT(*) FROM ContainerAssignment a JOIN ContainerAssignment b

@@ -1,5 +1,6 @@
 __pycache__/
 .pytest_cache/
+.test-temp/
 .pytest-tmp/
 .pytest-tmp-full/
 .pytest-tmp-final/

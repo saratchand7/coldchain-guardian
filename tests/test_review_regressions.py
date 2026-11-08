@@ -169,6 +169,9 @@ def test_compliance_requires_current_successful_detection(tmp_path):
     assert assess_shipment(db,'S')['outcome']=='NON_COMPLIANT'
     db.execute("UPDATE SensorReading SET value=5 WHERE sensor_id='X'");db.commit();detect_excursions(db,'S')
     assert assess_shipment(db,'S')['outcome']=='COMPLIANT'
+    validation=validate(p)
+    assert validation['status']=='PASS'
+    assert next(x for x in validation['checks'] if x['check']=='excursion_revision_snapshot_hash_integrity')['passed']
     add_reading(db,17,9);db.commit()
     assert 'ANALYSIS_STALE' in assess_shipment(db,'S')['issues']
     db.execute("INSERT INTO ThresholdPolicy VALUES('POL2','P','2025-01-01T00:00:00+00:00',NULL,2,8,30,60,10)");db.commit()
@@ -209,6 +212,56 @@ def test_required_modalities_and_timed_replacements(tmp_path):
     for minute in (0,5,10):add_reading(db,minute,5);add_reading(db,minute,50,sensor='H',unit='%')
     for minute in (15,20):add_reading(db,minute,5,sensor='X2');add_reading(db,minute,50,sensor='H2',unit='%')
     db.commit();detect_excursions(db,'S');assert assess_shipment(db,'S')['outcome']=='COMPLIANT';db.close()
+
+def _replacement_fixture(path,replacement_temp_values):
+    p=setup_db(path,completed=True);db=connect(p)
+    db.execute("UPDATE Product SET max_excursion_minutes=15")
+    db.execute("UPDATE ThresholdPolicy SET max_excursion_minutes=15")
+    db.execute("UPDATE ContainerAssignment SET ended_at=?",((T0+timedelta(minutes=15)).isoformat(),))
+    add_humidity_sensor(db)
+    db.execute("INSERT INTO Container VALUES('C2','box','AVAILABLE')")
+    db.execute("INSERT INTO Sensor VALUES('X2','C2','TEMP',?,'VALID')",(T0.isoformat(),))
+    db.execute("INSERT INTO Sensor VALUES('H2','C2','HUM',?,'VALID')",(T0.isoformat(),))
+    db.execute("INSERT INTO ContainerAssignment VALUES('AS2','C2','S',?,?)",
+               ((T0+timedelta(minutes=15)).isoformat(),(T0+timedelta(minutes=20)).isoformat()))
+    for minute in (0,5,10):
+        add_reading(db,minute,9);add_reading(db,minute,50,sensor='H',unit='%')
+    for minute,value in replacement_temp_values:
+        add_reading(db,minute,value,sensor='X2');add_reading(db,minute,50,sensor='H2',unit='%')
+    db.commit();detect_excursions(db,'S')
+    return p,db
+
+def test_sensor_handoff_preserves_condition_duration_and_traceability(tmp_path):
+    p,db=_replacement_fixture(tmp_path/'handoff.db',((15,9),(20,9)))
+    events=db.execute("SELECT * FROM Excursion WHERE kind='TEMP' AND json_extract(evidence_json,'$.condition_active')=1").fetchall()
+    assert len(events)==1 and events[0]['duration_minutes']==20 and events[0]['severity']=='MEDIUM'
+    evidence=json.loads(events[0]['evidence_json'])
+    assert evidence['sensor_ids']==['X','X2']
+    assert {x['reading_id'] for x in evidence['readings']}=={f'R-S-X-{m}' for m in (0,5,10)}|{f'R-S-X2-{m}' for m in (15,20)}
+    assert assess_shipment(db,'S')['outcome']=='NON_COMPLIANT'
+    assert validate(p)['status']=='PASS';db.close()
+
+    control=setup_db(tmp_path/'single.db',completed=True);db=connect(control)
+    db.execute("UPDATE Product SET max_excursion_minutes=15");db.execute("UPDATE ThresholdPolicy SET max_excursion_minutes=15")
+    add_humidity_sensor(db)
+    for minute in range(0,21,5):add_reading(db,minute,9);add_reading(db,minute,50,sensor='H',unit='%')
+    db.commit();detect_excursions(db,'S')
+    assert db.execute("SELECT duration_minutes FROM Excursion WHERE kind='TEMP'").fetchone()[0]==20
+    assert assess_shipment(db,'S')['outcome']=='NON_COMPLIANT';db.close()
+
+def test_sensor_handoff_safe_recovery_and_unknown_gap(tmp_path):
+    p,db=_replacement_fixture(tmp_path/'recovery.db',((15,5),(20,5)))
+    event=db.execute("SELECT * FROM Excursion WHERE kind='TEMP'").fetchone();evidence=json.loads(event['evidence_json'])
+    assert event['duration_minutes']==15 and event['severity']=='LOW'
+    assert evidence['recovery_reading_id']=='R-S-X2-15' and evidence['sensor_ids']==['X','X2']
+    assert assess_shipment(db,'S')['outcome']=='COMPLIANT';db.close()
+
+    p,db=_replacement_fixture(tmp_path/'unknown.db',((20,9),))
+    event=db.execute("SELECT * FROM Excursion WHERE kind='TEMP'").fetchone()
+    outcome=assess_shipment(db,'S')
+    assert event['duration_minutes']==15 and event['severity']=='LOW'
+    assert outcome['outcome']=='INCOMPLETE_EVIDENCE' and 'INCOMPLETE_MODALITY_COVERAGE:TEMP' in outcome['issues']
+    db.close()
 
 def test_impossible_valid_value_and_late_gap_reconciliation(tmp_path):
     p=setup_db(tmp_path/'physical.db',completed=True);db=connect(p);add_complete_dual_readings(db)
