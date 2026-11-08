@@ -54,3 +54,37 @@ Warnings: 0
 - ROUTE_DELAY: 41
 - SENSOR_GAP: 157
 - TEMP: 194
+
+## Independent recheck of `f0f73ae`
+
+The 8 November 2026 recheck reported 30 passing tests. Its independent fixtures
+confirmed that a continuous temperature excursion survives sensor replacement
+with its duration and contributing sensor IDs intact. Reanalysis after source
+correction passed validation, including the archived revision integrity check.
+The SQL restore integration test rebuilt analysis for all 12 starter shipments
+and reproduced the original assessment counts.
+
+The independent full run used `python generate_data.py --scale full --seed 20261022`
+and produced 1,000 shipments, 1,812,402 readings, and 592 excursions. It passed
+31 of 31 validation checks and all three negative-decision cases. Labelled event
+matching found 592 true positives, zero false positives, and zero false negatives.
+All 18 export hashes and both ground-truth hashes matched the manifest. The
+assessment counts were 608 compliant, 35 non-compliant, 57 with incomplete
+evidence, and 300 not yet assessed.
+
+### Open issue with concurrent containers
+
+The full-run generator assigns one container per shipment at a time. A separate
+20-minute fixture assigned two containers concurrently and recorded complete,
+calibrated readings every five minutes. One container stayed at 9 °C and the
+other at 5 °C against a 2–8 °C policy with a 10-minute excursion allowance.
+The engine pooled the temperature readings, emitted no excursion, and reported
+`COMPLIANT`. Validation passed.
+
+Detection and assessment need to evaluate each monitored container and combine
+their results at shipment level. Regression coverage should include concurrent
+safe and violating containers, two safe containers, disagreement between
+redundant sensors on the same container, validated sensor replacement, and a
+missing interval. Evidence should identify the affected container, sensor,
+readings, and policy. The independent recheck did not exercise the Windows
+launcher.
