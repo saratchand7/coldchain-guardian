@@ -97,3 +97,14 @@ tests, the concurrent 9 °C container produced a traceable 20-minute excursion a
 a `NON_COMPLIANT` shipment. Two safe containers produced `COMPLIANT`. Conflicting
 observations at a handoff produced `INCOMPLETE_EVIDENCE`. The existing handoff and
 missing-slot regression tests also passed.
+
+### Verification after the correction
+
+All 33 automated tests passed. An isolated full-scale run with seed 20261022
+passed all 31 validation checks. It matched 592 labelled events with zero false
+positives and zero false negatives, and all three negative-decision cases passed.
+
+Detection was also rerun against the existing local database using its saved
+observation windows. All 1,000 shipment analyses completed successfully. The
+refreshed assessment counted 608 compliant, 35 non-compliant, 57 with incomplete
+evidence, and 300 not yet assessed.
