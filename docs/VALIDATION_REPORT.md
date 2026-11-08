@@ -2,7 +2,7 @@
 
 Status: **PASS**
 
-Checks passed: 30 / 30
+Checks passed: 31 / 31
 
 | Check | Result | Count |
 |---|---:|---:|
@@ -24,6 +24,7 @@ Checks passed: 30 / 30
 | container_status_assignment_reconciliation | PASS | 0 |
 | excursion_duration_recalculation_from_sources | PASS | 0 |
 | open_excursion_is_current | PASS | 0 |
+| excursion_revision_snapshot_hash_integrity | PASS | 0 |
 | shipment_lifecycle_enum | PASS | 0 |
 | container_assignment_overlap | PASS | 0 |
 | expected_sensor_coverage_spans_persisted | PASS | 0 |
